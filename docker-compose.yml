@@ -1,0 +1,143 @@
+services:
+  smokeping-prober:
+    image: quay.io/superq/smokeping-prober:latest
+    container_name: smokeping-prober
+    restart: unless-stopped
+
+    cap_add:
+      - NET_RAW
+
+    env_file:
+      - .env
+
+    environment:
+      GOMAXPROCS: "1"
+
+    command:
+      - --config.file=/etc/smokeping_prober/config.yaml
+      - --web.listen-address=:9374
+      - --web.telemetry-path=/metrics
+      - --log.level=info
+
+    volumes:
+      - ./config:/etc/smokeping_prober:ro
+
+    ports:
+      - "127.0.0.1:9374:9474"
+
+    networks:
+      - default
+      - traefik-public
+
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.ping.rule: "Host(`ping.tecmaistelecom.com.br`)"
+      traefik.http.routers.ping.entrypoints: "https"
+      traefik.http.routers.ping.tls: "true"
+      traefik.http.routers.ping.tls.certresolver: "le"
+      traefik.http.services.ping.loadbalancer.server.port: "9374"
+      traefik.docker.network: "traefik-public"
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus-smokeping
+    restart: unless-stopped
+
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=90d
+      - --storage.tsdb.retention.size=20GB
+      - --web.enable-lifecycle
+
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+
+    ports:
+      - "127.0.0.1:9090:9090"
+
+    networks:
+      - traefik-public
+
+    depends_on:
+      - smokeping-prober
+
+  smokeping-alert-engine:
+    build:
+      context: ./alert-engine
+      dockerfile: Dockerfile
+
+    image: smokeping-alert-engine:local
+    container_name: smokeping-alert-engine
+    restart: unless-stopped
+
+    env_file:
+      - .env
+
+    cap_add:
+      - NET_RAW
+
+    volumes:
+      - alert-engine-data:/data
+
+    networks:
+      - default
+      - traefik-public
+
+    depends_on:
+      - prometheus
+
+  smokeping-manager:
+    build:
+      context: ./manager
+      dockerfile: Dockerfile
+
+    image: smokeping-manager:local
+    container_name: smokeping-manager
+    restart: unless-stopped
+
+    env_file:
+      - .env
+
+    # Use o mesmo UID/GID proprietário do diretório ./config no host.
+    user: "${PUID:-1000}:${PGID:-1000}"
+
+    volumes:
+      - ./config:/config
+
+    networks:
+      - traefik-public
+
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.smokeping-manager.rule: "Host(`manager-ping.tecmaistelecom.com.br`)"
+      traefik.http.routers.smokeping-manager.entrypoints: "https"
+      traefik.http.routers.smokeping-manager.tls: "true"
+      traefik.http.routers.smokeping-manager.tls.certresolver: "le"
+      traefik.http.services.smokeping-manager.loadbalancer.server.port: "8080"
+      traefik.docker.network: "traefik-public"
+
+    depends_on:
+      - smokeping-prober
+      - prometheus
+
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  prometheus-data:
+  alert-engine-data:
+
+networks:
+  default:
+    enable_ipv6: true
+    ipam:
+      config:
+        - subnet: fd42:170:81::/64
+  traefik-public:
+    external: true
+    name: traefik-public

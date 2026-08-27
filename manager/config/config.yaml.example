@@ -1,0 +1,13 @@
+targets:
+  - host: "1.1.1.1"
+    interval: 1s
+    network: ip4
+    protocol: icmp
+    size: 56
+    tos: 0x00
+    labels:
+      category: "DNS"
+      menu: "Cloudflare DNS"
+      title: "Cloudflare 1 - 1.1.1.1"
+      smokeping_name: "Cloudflare-1-v4"
+      alerts_enabled: "true"

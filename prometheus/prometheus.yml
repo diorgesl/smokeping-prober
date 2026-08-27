@@ -1,0 +1,12 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: smokeping-prober
+    scrape_interval: 15s
+    static_configs:
+      - targets:
+          - smokeping-prober:9374
+        labels:
+          site: tecmais

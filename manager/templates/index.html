@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>SmokePing Manager</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div class="shell">
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+        <div>
+          <strong>SmokePing</strong>
+          <span>Target Manager</span>
+        </div>
+      </div>
+      <div class="top-actions">
+        <button class="button ghost" id="reloadButton" type="button">↻ Recarregar prober</button>
+        <button class="button primary" id="addButton" type="button"><span>＋</span> Novo destino</button>
+      </div>
+    </header>
+
+    <main>
+      <section class="intro">
+        <div>
+          <span class="eyebrow">MONITORAMENTO DE REDE</span>
+          <h1>Destinos</h1>
+          <p>Gerencie seus alvos ICMP e acompanhe a saúde dos últimos {{ metric_window }}.</p>
+        </div>
+        <div class="summary" aria-label="Resumo dos destinos">
+          <button type="button" class="summary-item active" data-status="" aria-pressed="true"><b id="totalCount">—</b><span>Total</span></button>
+          <button type="button" class="summary-item" data-status="healthy" aria-pressed="false"><b id="healthyCount">—</b><span>Saudáveis</span></button>
+          <button type="button" class="summary-item" data-status="alert" aria-pressed="false"><b id="alertCount">—</b><span>Em alerta</span></button>
+        </div>
+      </section>
+
+      <section class="toolbar" aria-label="Filtros">
+        <label class="search">
+          <span aria-hidden="true">⌕</span>
+          <input id="searchInput" type="search" placeholder="Buscar por nome, host ou categoria…" autocomplete="off">
+        </label>
+        <label class="select-wrap">
+          <span>Categoria</span>
+          <select id="categoryFilter"><option value="">Todas</option></select>
+        </label>
+        <button class="icon-button" id="refreshButton" type="button" title="Atualizar métricas" aria-label="Atualizar métricas">↻</button>
+      </section>
+
+      <div class="notice hidden" id="metricNotice"></div>
+      <section class="cards" id="cards" aria-live="polite"></section>
+      <section class="empty hidden" id="emptyState">
+        <span>◎</span>
+        <h2>Nenhum destino encontrado</h2>
+        <p>Altere os filtros ou adicione seu primeiro destino.</p>
+      </section>
+    </main>
+  </div>
+
+  <dialog id="targetDialog">
+    <form id="targetForm" method="dialog">
+      <div class="dialog-head">
+        <div><span class="eyebrow">CONFIGURAÇÃO</span><h2 id="dialogTitle">Novo destino</h2></div>
+        <button class="close" id="closeDialog" type="button" aria-label="Fechar">×</button>
+      </div>
+      <input id="targetId" type="hidden">
+      <div class="form-grid">
+        <label class="wide">Nome do destino<input name="title" required maxlength="180" placeholder="Ex.: Cloudflare DNS 1"></label>
+        <label class="wide">Host ou endereço IP<input name="host" required maxlength="253" placeholder="1.1.1.1 ou 2606:4700:4700::1111"></label>
+        <label>Categoria<input name="category" required list="categoryOptions" placeholder="DNS"></label>
+        <datalist id="categoryOptions"></datalist>
+        <label>Identificador SmokePing<input name="smokeping_name" maxlength="120" placeholder="Gerado automaticamente"></label>
+        <label>Família de rede<select name="network"><option value="auto">Automática</option><option value="ip4">IPv4</option><option value="ip6">IPv6</option></select></label>
+        <label>Intervalo<input name="interval" value="1s" required pattern="[1-9][0-9]*(ms|s|m)"></label>
+        <label>Tamanho do pacote<input name="size" type="number" min="8" max="9000" value="56" required></label>
+        <label>TOS<input name="tos" value="0x00" required pattern="0x[0-9a-fA-F]{2}"></label>
+        <label class="switch-row wide">
+          <span><b>Alertas deste destino</b><small>Inclui o target no Alert Engine e nos diagnósticos MTR.</small></span>
+          <input name="alerts_enabled" type="checkbox" checked role="switch">
+        </label>
+      </div>
+      <div class="dialog-actions">
+        <button class="button ghost hidden" id="duplicateButton" type="button">⧉ Copiar</button>
+        <button class="button ghost" id="cancelDialog" type="button">Cancelar</button>
+        <button class="button primary" type="submit"><span id="saveSpinner" class="spinner hidden"></span> Salvar destino</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog class="confirm-dialog" id="deleteDialog">
+    <div class="confirm-icon">!</div>
+    <h2>Excluir destino?</h2>
+    <p id="deleteText"></p>
+    <div class="dialog-actions">
+      <button class="button ghost" id="cancelDelete" type="button">Cancelar</button>
+      <button class="button danger" id="confirmDelete" type="button">Excluir definitivamente</button>
+    </div>
+  </dialog>
+
+  <dialog class="confirm-dialog" id="reloadDialog">
+    <div class="confirm-icon">!</div>
+    <h2>Fazer reload na config do Smokeping Prober?</h2>
+    <p>O config.yaml será recarregado diretamente no smokeping-probe sem reinicia-lo.</p>
+    <div class="dialog-actions">
+      <button class="button ghost" id="cancelReload" type="button">Cancelar</button>
+      <button class="button primary" id="confirmReload" type="button">Recarregar</button>
+    </div>
+  </dialog>
+
+  <div class="toast-stack" id="toasts" aria-live="polite"></div>
+  <script src="/static/app.js" defer></script>
+</body>
+</html>

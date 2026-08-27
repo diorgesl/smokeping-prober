@@ -1,0 +1,39 @@
+# Exemplo de config.yaml consumido pelo smokeping_prober.
+# Copie para config.yaml e ajuste os targets (ou gerencie via smokeping-manager).
+targets:
+  - host: "1.1.1.1"
+    interval: 1s
+    network: ip4
+    protocol: icmp
+    size: 56
+    tos: 0x00
+    labels:
+      category: "DNS"
+      menu: "Cloudflare 1"
+      title: "Cloudflare 1 - 1.1.1.1"
+      smokeping_name: "Cloudflare-1-v4"
+      alerts_enabled: "true"
+  - host: "8.8.8.8"
+    interval: 1s
+    network: ip4
+    protocol: icmp
+    size: 56
+    tos: 0x00
+    labels:
+      category: "DNS"
+      menu: "Google 1"
+      title: "Google 1 - 8.8.8.8"
+      smokeping_name: "Google-1-v4"
+      alerts_enabled: "true"
+  - host: "2606:4700:4700::1111"
+    interval: 1s
+    network: ip6
+    protocol: icmp
+    size: 56
+    tos: 0x00
+    labels:
+      category: "DNS"
+      menu: "Cloudflare 1 v6"
+      title: "Cloudflare 1 - 2606:4700:4700::1111"
+      smokeping_name: "Cloudflare-1-v6"
+      alerts_enabled: "false"
