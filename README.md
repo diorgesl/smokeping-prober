@@ -78,7 +78,6 @@ Os labels no `docker-compose.yml` trazem os domínios e o cert resolver desta
 instalação específica e **não são templados pelo `.env`**:
 
 ```yaml
-traefik.http.routers.ping.rule: "Host(`ping.meudominio.com.br`)"
 traefik.http.routers.smokeping-manager.rule: "Host(`manager-ping.meudominio.com.br`)"
 traefik.http.routers.*.tls.certresolver: "le"
 ```
