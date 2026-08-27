@@ -7,11 +7,11 @@ avalia perda/latência/jitter por destino, roda diagnóstico MTR automático e
 
 ## Serviços
 
-| Serviço | Descrição | Detalhes |
-|---|---|---|
-| `smokeping-prober` | Executa os pings ICMP e expõe métricas Prometheus | imagem oficial `quay.io/superq/smokeping-prober` |
-| `prometheus` | Coleta e armazena as métricas do prober (scrape a cada 15s) | `prometheus/prometheus.yml` |
-| `smokeping-manager` | Dashboard web para criar/editar/duplicar/excluir destinos no `config.yaml` | [manager/README.md](manager/README.md) |
+| Serviço                  | Descrição                                                                                 | Detalhes                                         |
+| ------------------------ | ----------------------------------------------------------------------------------------- | ------------------------------------------------ |
+| `smokeping-prober`       | Executa os pings ICMP e expõe métricas Prometheus                                         | imagem oficial `quay.io/superq/smokeping-prober` |
+| `prometheus`             | Coleta e armazena as métricas do prober (scrape a cada 15s)                               | `prometheus/prometheus.yml`                      |
+| `smokeping-manager`      | Dashboard web para criar/editar/duplicar/excluir destinos no `config.yaml`                | [manager/README.md](manager/README.md)           |
 | `smokeping-alert-engine` | Avalia cada destino, abre/agrava/recupera incidentes e alerta no Telegram com MTR anexado | [alert-engine/README.md](alert-engine/README.md) |
 
 `config/config.yaml` é a fonte única de verdade dos destinos — usado
@@ -78,8 +78,8 @@ Os labels no `docker-compose.yml` trazem os domínios e o cert resolver desta
 instalação específica e **não são templados pelo `.env`**:
 
 ```yaml
-traefik.http.routers.ping.rule: "Host(`ping.tecmaistelecom.com.br`)"
-traefik.http.routers.smokeping-manager.rule: "Host(`manager-ping.tecmaistelecom.com.br`)"
+traefik.http.routers.ping.rule: "Host(`ping.meudominio.com.br`)"
+traefik.http.routers.smokeping-manager.rule: "Host(`manager-ping.meudominio.com.br`)"
 traefik.http.routers.*.tls.certresolver: "le"
 ```
 
