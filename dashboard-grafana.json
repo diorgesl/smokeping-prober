@@ -2,7 +2,7 @@
   "apiVersion": "dashboard.grafana.app/v2",
   "kind": "Dashboard",
   "metadata": {
-    "name": "qFUCgeXuww",
+    "name": "smokeping-prober",
     "namespace": "default",
     "uid": "48ed9eab-b6b2-45e1-8619-83489f425e54",
     "resourceVersion": "1787772528628993",
@@ -10,12 +10,6 @@
     "creationTimestamp": "2026-08-26T19:28:00Z",
     "labels": {
       "grafana.app/deprecatedInternalID": "3025351172767744"
-    },
-    "annotations": {
-      "grafana.app/createdBy": "user:ff38bxjx0ni80f",
-      "grafana.app/saved-from-ui": "Grafana v13.1.3 (45a27d64b6)",
-      "grafana.app/updatedBy": "user:ff38bxjx0ni80f",
-      "grafana.app/updatedTimestamp": "2026-08-26T19:28:48Z"
     }
   },
   "spec": {
@@ -68,7 +62,7 @@
                       "group": "prometheus",
                       "version": "v0",
                       "datasource": {
-                        "name": "afwcksz8b71tse"
+                        "name": "smokeping-prometheus"
                       },
                       "spec": {
                         "editorMode": "code",
@@ -177,7 +171,7 @@
                       "group": "prometheus",
                       "version": "v0",
                       "datasource": {
-                        "name": "afwcksz8b71tse"
+                        "name": "smokeping-prometheus"
                       },
                       "spec": {
                         "editorMode": "code",
@@ -198,7 +192,7 @@
                       "group": "prometheus",
                       "version": "v0",
                       "datasource": {
-                        "name": "afwcksz8b71tse"
+                        "name": "smokeping-prometheus"
                       },
                       "spec": {
                         "editorMode": "code",
@@ -356,7 +350,7 @@
                       "group": "prometheus",
                       "version": "v0",
                       "datasource": {
-                        "name": "afwcksz8b71tse"
+                        "name": "smokeping-prometheus"
                       },
                       "spec": {
                         "editorMode": "code",
@@ -609,7 +603,7 @@
             "group": "prometheus",
             "version": "v0",
             "datasource": {
-              "name": "afwcksz8b71tse"
+              "name": "smokeping-prometheus"
             },
             "spec": {
               "qryType": 1,
@@ -643,7 +637,7 @@
             "group": "prometheus",
             "version": "v0",
             "datasource": {
-              "name": "afwcksz8b71tse"
+              "name": "smokeping-prometheus"
             },
             "spec": {
               "qryType": 1,
