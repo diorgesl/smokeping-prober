@@ -138,11 +138,19 @@ class ConfigStoreTest(unittest.TestCase):
         with patch.object(client, "query", side_effect=query):
             metrics, error = client.metrics()
         self.assertEqual("", error)
-        self.assertEqual(0, metrics[("8.8.8.8", "G", "DNS", False)]["loss"])
-        remote = metrics[("8.8.8.8", "G", "DNS", True)]
-        self.assertEqual(25, remote["loss"])
-        self.assertEqual({"viams": 0, "brdigital": 50}, {link["name"]: link["loss"] for link in remote["links"]})
-        self.assertEqual("critical", metric_status(remote))
+        target = metrics[("8.8.8.8", "G", "DNS")]
+        # Top-level values are the local ping, not a mix with the links.
+        self.assertEqual(0, target["loss"])
+        self.assertEqual(10, target["latency"])
+        self.assertEqual({"viams": 0, "brdigital": 50}, {link["name"]: link["loss"] for link in target["links"]})
+        self.assertEqual("critical", metric_status(target))
+
+        # Router target without a local series: no top-level values.
+        del responses["smokeping_requests_total"][0]
+        with patch.object(client, "query", side_effect=query):
+            metrics, _ = client.metrics()
+        self.assertIsNone(metrics[("8.8.8.8", "G", "DNS")]["latency"])
+        self.assertEqual("critical", metric_status(metrics[("8.8.8.8", "G", "DNS")]))
 
     @patch("app.reload_prober", return_value="")
     def test_tos_is_written_unquoted(self, _reload):

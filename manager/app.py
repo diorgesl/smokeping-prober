@@ -630,12 +630,13 @@ class PrometheusClient:
                 continue
         return result
 
-    def metrics(self) -> tuple[dict[tuple[str, str, str, bool], dict[str, Any]], str]:
-        """Metrics per target, keyed by (host, title, category, remote).
+    def metrics(self) -> tuple[dict[tuple[str, str, str], dict[str, Any]], str]:
+        """Metrics per target, keyed by (host, title, category).
 
-        Remote (router) series carry a ``link`` label, one series per uplink;
-        they are aggregated per target and also returned per link, so a bad
-        uplink isn't hidden by a healthy one.
+        The top-level values come from the local ping (series with no ``link``
+        label). A router target also has one series per uplink, returned
+        separately in ``links``; when there is no local series the top-level
+        values are None.
         """
         group = "host,title,category,link"
         sent = f"sum by ({group}) (increase(smokeping_requests_total[{METRIC_WINDOW}]))"
@@ -652,25 +653,22 @@ class PrometheusClient:
             LOG.warning("Prometheus unavailable: %s", exc)
             return {}, str(exc)
 
-        grouped: dict[tuple[str, str, str, bool], list[tuple[str, float, float, float, float]]] = {}
-        for key, samples in sent_values.items():
+        output: dict[tuple[str, str, str], dict[str, Any]] = {}
+        for key, samples in sorted(sent_values.items()):
             host, title, category, link = key
-            jitter = 1000 * max(0.0, p95_values.get(key, 0) - p50_values.get(key, 0))
-            grouped.setdefault((host, title, category, bool(link)), []).append(
-                (link, samples, received_values.get(key, 0), duration_values.get(key, 0), jitter)
+            summary = self._summary(
+                samples,
+                received_values.get(key, 0),
+                duration_values.get(key, 0),
+                1000 * max(0.0, p95_values.get(key, 0) - p50_values.get(key, 0)),
             )
-
-        output: dict[tuple[str, str, str, bool], dict[str, Any]] = {}
-        for key, rows in grouped.items():
-            values = self._summary(
-                sum(r[1] for r in rows), sum(r[2] for r in rows), sum(r[3] for r in rows), max(r[4] for r in rows)
+            values = output.setdefault(
+                (host, title, category), {"samples": None, "loss": None, "latency": None, "jitter": None}
             )
-            if key[3]:
-                values["links"] = [
-                    {"name": link, **self._summary(sent, replies, seconds, jitter)}
-                    for link, sent, replies, seconds, jitter in sorted(rows)
-                ]
-            output[key] = values
+            if link:
+                values.setdefault("links", []).append({"name": link, **summary})
+            else:
+                values.update(summary)
         return output, ""
 
     @staticmethod
@@ -751,7 +749,7 @@ def list_targets() -> dict[str, Any]:
     targets = store.list()
     metric_values, metric_error = prometheus.metrics()
     for target in targets:
-        key = (target["host"], target["title"], target["category"], bool(target["router"]))
+        key = (target["host"], target["title"], target["category"])
         target["metrics"] = metric_values.get(key)
         target["status"] = metric_status(target["metrics"])
     return {
@@ -765,8 +763,9 @@ def list_targets() -> dict[str, Any]:
 def metric_status(metrics: dict[str, Any] | None) -> str:
     if not metrics:
         return "unknown"
-    # A remote target is as bad as its worst uplink.
-    loss = max([metrics["loss"], *(link["loss"] for link in metrics.get("links", []))])
+    # A router target is as bad as the worst of its local ping and uplinks.
+    losses = [metrics["loss"], *(link["loss"] for link in metrics.get("links", []))]
+    loss = max(value for value in losses if value is not None)
     if loss >= DOWN_LOSS:
         return "down"
     if loss >= CRITICAL_LOSS:

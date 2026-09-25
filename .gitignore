@@ -3,6 +3,8 @@
 .env.local
 .env.*.local
 
+config.yaml
+
 # Runtime config managed by smokeping-manager (real targets + auto-backups)
 config/config.yaml
 config/backups/
