@@ -103,10 +103,7 @@
         <label>TOS<input name="tos" value="0x00" required pattern="0x[0-9a-fA-F]{2}"></label>
         <fieldset class="remote-fields wide hidden" id="remoteFields">
           <legend>Ping pelo roteador</legend>
-          <div class="link-choices wide">
-            <span>Links usados <small>(nenhum marcado = todos)</small></span>
-            <div id="linkChoices"></div>
-          </div>
+          <p class="remote-hint">Pingado a partir de todos os links do roteador: <span id="routerLinks"></span></p>
           <label>Pacotes por rodada<input name="count" type="number" min="1" max="100" placeholder="10"></label>
           <label>Intervalo entre pacotes<input name="packet_interval" placeholder="50ms" pattern="[1-9][0-9]*(ms|s|m)"></label>
           <label>Timeout por resposta<input name="timeout" placeholder="500ms" pattern="[1-9][0-9]*(ms|s|m)"></label>

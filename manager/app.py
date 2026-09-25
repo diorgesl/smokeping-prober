@@ -108,7 +108,6 @@ class TargetInput(BaseModel):
     alerts_enabled: bool = True
     # Remote ping through a router (empty router = local ICMP from the prober).
     router: str = ""
-    links: list[str] = Field(default_factory=list)
     count: int | None = Field(default=None, ge=1, le=100)
     packet_interval: str = ""
     timeout: str = ""
@@ -127,12 +126,6 @@ class TargetInput(BaseModel):
     @classmethod
     def validate_router(cls, value: str) -> str:
         return clean_name(value, "Roteador") if value.strip() else ""
-
-    @field_validator("links")
-    @classmethod
-    def validate_links(cls, value: list[str]) -> list[str]:
-        names = [clean_name(item, "Link") for item in value]
-        return list(dict.fromkeys(names))
 
     @field_validator("packet_interval", "timeout")
     @classmethod
@@ -369,19 +362,13 @@ class ConfigStore:
 
     def _check_router(self, document: Any, payload: TargetInput) -> None:
         if not payload.router:
-            if payload.links:
-                raise HTTPException(status_code=422, detail="Links só podem ser usados com um roteador")
             return
         router = self._router_by_name(document, payload.router)
         if router is None:
             raise HTTPException(status_code=422, detail=f"Roteador {payload.router} não existe")
-        links = {str(link.get("name")): link for link in router.get("links") or []}
-        unknown = [name for name in payload.links if name not in links]
-        if unknown:
-            raise HTTPException(status_code=422, detail=f"Links inexistentes em {payload.router}: {', '.join(unknown)}")
+        # The router pings every target from all of its links.
         if self._network(payload.host, payload.network) == "ip6":
-            used = payload.links or list(links)
-            missing = [name for name in used if not links[name].get("source6")]
+            missing = [str(link.get("name")) for link in router.get("links") or [] if not link.get("source6")]
             if missing:
                 raise HTTPException(
                     status_code=422,
@@ -421,8 +408,6 @@ class ConfigStore:
             }
         )
         if payload.router:
-            if payload.links:
-                target["links"] = list(payload.links)
             if payload.count is not None:
                 target["count"] = payload.count
             if payload.packet_interval:
@@ -455,7 +440,6 @@ class ConfigStore:
             "size": int(target.get("size", 56)),
             "tos": tos_text(target.get("tos", 0)),
             "router": str(target.get("router") or ""),
-            "links": [str(link) for link in target.get("links") or []],
             "count": int(target["count"]) if target.get("count") is not None else None,
             "packet_interval": str(target.get("packet_interval") or ""),
             "timeout": str(target.get("timeout") or ""),
@@ -485,16 +469,7 @@ class ConfigStore:
             index = self._find_router(routers, name)
             if payload.name != name and self._router_by_name(document, payload.name) is not None:
                 raise HTTPException(status_code=409, detail=f"Já existe um roteador chamado {payload.name}")
-            kept_links = {link.name for link in payload.links}
             users = [t for t in document["targets"] if str(t.get("router") or "") == name]
-            orphaned = sorted(
-                {str(link) for t in users for link in t.get("links") or [] if str(link) not in kept_links}
-            )
-            if orphaned:
-                raise HTTPException(
-                    status_code=409,
-                    detail=f"Links ainda usados por destinos: {', '.join(orphaned)}",
-                )
             candidate = self._router_to_yaml(payload)
             routers[index] = candidate
             for target in users:

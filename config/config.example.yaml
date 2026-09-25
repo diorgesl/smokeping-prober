@@ -61,7 +61,6 @@ targets:
     protocol: icmp
     size: 56
     tos: 0x00
-    # links: [isp-a]    # opcional: subconjunto dos links do roteador
     # count: 10         # pacotes por rodada (default 10)
     labels:
       category: "DNS"

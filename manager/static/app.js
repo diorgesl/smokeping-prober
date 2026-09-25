@@ -44,7 +44,7 @@ function render() {
   cards.innerHTML = visible.map(t => {
     const m = t.metrics;
     return `<article class="card ${escapeHtml(t.status)} ${t.alerts_enabled ? "alerts-on" : "alerts-off"}" data-id="${t.id}">
-      <div class="card-head"><div><h2>${escapeHtml(t.title)}</h2><div class="host">${escapeHtml(t.host)}</div><span class="badge">${escapeHtml(t.category)}</span>${t.router ? `<span class="badge router" title="${escapeHtml(t.links.length ? t.links.join(", ") : "todos os links")}">via ${escapeHtml(t.router)}</span>` : ""}</div>
+      <div class="card-head"><div><h2>${escapeHtml(t.title)}</h2><div class="host">${escapeHtml(t.host)}</div><span class="badge">${escapeHtml(t.category)}</span>${t.router ? `<span class="badge router">via ${escapeHtml(t.router)}</span>` : ""}</div>
       <div class="menu"><button class="menu-button" data-action="menu" aria-label="Opções">⋮</button><div class="menu-list hidden"><button data-action="edit">Editar</button><button data-action="duplicate">Copiar</button><button class="delete" data-action="delete">Excluir</button></div></div></div>
       <div class="metrics"><div class="metric"><span>Latência</span><b>${metric(m?.latency," ms")}</b></div><div class="metric"><span>Perda</span><b>${metric(m?.loss,"%")}</b></div><div class="metric"><span>Jitter</span><b>${metric(m?.jitter," ms")}</b></div></div>
       ${linkMetrics(m)}
@@ -74,10 +74,10 @@ function renderRouterOptions(selected="") {
   $("#routerSelect").innerHTML = '<option value="">Local (prober)</option>' + state.routers.map(r => `<option value="${escapeHtml(r.name)}">${escapeHtml(r.name)} (${escapeHtml(r.address)})</option>`).join("");
   $("#routerSelect").value = state.routers.some(r => r.name === selected) ? selected : "";
 }
-function renderRemoteFields(selectedLinks=[]) {
+function renderRemoteFields() {
   const router = state.routers.find(r => r.name === $("#routerSelect").value);
   $("#remoteFields").classList.toggle("hidden", !router);
-  $("#linkChoices").innerHTML = router ? router.links.map(l => `<label><input type="checkbox" name="links" value="${escapeHtml(l.name)}" ${selectedLinks.includes(l.name) ? "checked" : ""}>${escapeHtml(l.name)}${l.vpn_instance ? ` <small>${escapeHtml(l.vpn_instance)}</small>` : ""}</label>`).join("") : "";
+  $("#routerLinks").textContent = router ? router.links.map(l => l.name).join(", ") : "";
 }
 $("#routerSelect").addEventListener("change", () => {
   // Remote runs send a burst of pings per run, so 1s makes no sense there.
@@ -92,8 +92,8 @@ function openForm(target=null, {duplicate=false}={}) {
   $("#duplicateButton").classList.toggle("hidden", duplicate || !target?.id);
   const values = target ? {...target, ...(duplicate ? {title:`${target.title} (cópia)`, smokeping_name:""} : {})} : {network:"auto",interval:"1s",size:56,tos:"0x00",alerts_enabled:true};
   renderRouterOptions(values.router || "");
-  for (const [key,value] of Object.entries(values)) { if (key === "router" || key === "links") continue; const input=form.elements.namedItem(key); if (!input) continue; input.type === "checkbox" ? input.checked=Boolean(value) : input.value=value ?? ""; }
-  renderRemoteFields(values.links || []);
+  for (const [key,value] of Object.entries(values)) { if (key === "router") continue; const input=form.elements.namedItem(key); if (!input) continue; input.type === "checkbox" ? input.checked=Boolean(value) : input.value=value ?? ""; }
+  renderRemoteFields();
   dialog.showModal(); setTimeout(() => form.elements.title.focus(), 50);
 }
 cards.addEventListener("click", async event => {
@@ -110,8 +110,8 @@ cards.addEventListener("change", async event => {
 });
 form.addEventListener("submit", async event => {
   event.preventDefault(); $("#saveSpinner").classList.remove("hidden");
-  const formData=new FormData(form); const data=Object.fromEntries(formData); data.size=Number(data.size); data.alerts_enabled=form.elements.alerts_enabled.checked; data.protocol="icmp"; data.menu=data.title;
-  data.links = data.router ? formData.getAll("links") : []; data.count = data.router && data.count ? Number(data.count) : null;
+  const data=Object.fromEntries(new FormData(form)); data.size=Number(data.size); data.alerts_enabled=form.elements.alerts_enabled.checked; data.protocol="icmp"; data.menu=data.title;
+  data.count = data.router && data.count ? Number(data.count) : null;
   if (!data.router) { data.packet_interval = ""; data.timeout = ""; }
   const id=$("#targetId").value;
   try { const result=await api(id?`/api/targets/${id}`:"/api/targets",{method:id?"PUT":"POST",body:JSON.stringify(data)}); dialog.close(); toast(id?"Destino atualizado":"Destino adicionado"); if(result.warning) toast(`Salvo; reload pendente: ${result.warning}`,true); await loadTargets(true); }

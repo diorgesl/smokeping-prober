@@ -71,10 +71,10 @@ class ConfigStoreTest(unittest.TestCase):
         self.assertLess(text.index("routers:"), text.index("targets:"))
 
         target, _ = self.store.create(
-            TargetInput(title="Google 1 - 8.8.8.8", host="8.8.8.8", category="DNS", router="ne8k", interval="1m", links=["viams"])
+            TargetInput(title="Google 1 - 8.8.8.8", host="8.8.8.8", category="DNS", router="ne8k", interval="1m")
         )
         self.assertEqual("ne8k", target["router"])
-        self.assertEqual(["viams"], target["links"])
+        self.assertNotIn("links:", self.path.read_text(encoding="utf-8").split("targets:")[1])
 
         # Same host/category pinged locally is a different target.
         local, _ = self.store.create(TargetInput(title="Google 1 - 8.8.8.8", host="8.8.8.8", category="DNS"))
@@ -82,12 +82,6 @@ class ConfigStoreTest(unittest.TestCase):
 
         with self.assertRaises(HTTPException) as ctx:
             self.store.delete_router("ne8k")
-        self.assertEqual(409, ctx.exception.status_code)
-
-        # Removing a link still used by a target is refused.
-        only_br = ne8k(links=[{"name": "brdigital", "source": "201.16.216.77"}])
-        with self.assertRaises(HTTPException) as ctx:
-            self.store.update_router("ne8k", only_br)
         self.assertEqual(409, ctx.exception.status_code)
 
         # Renaming cascades to the targets that use the router.
@@ -109,8 +103,6 @@ class ConfigStoreTest(unittest.TestCase):
         with self.assertRaises(HTTPException) as ctx:
             self.store.create(TargetInput(title="X", host="2001:4860:4860::8888", category="DNS", router="ne8k"))
         self.assertIn("source6", ctx.exception.detail)
-        with self.assertRaises(HTTPException):
-            self.store.create(TargetInput(title="X", host="8.8.8.8", category="DNS", router="ne8k", links=["isp-b"]))
 
     def test_router_input_validation(self):
         self.assertEqual("10.0.0.1:22", ne8k(address="10.0.0.1").address)
