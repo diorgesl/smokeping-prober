@@ -17,7 +17,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 from jinja2 import Environment, FileSystemLoader, select_autoescape
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from ruamel.yaml import YAML
 
 
@@ -38,16 +38,52 @@ USERNAME = os.getenv("MANAGER_USERNAME", "")
 PASSWORD = os.getenv("MANAGER_PASSWORD", "")
 
 
+NAME_PATTERN = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,62}"
+DURATION_PATTERN = r"[1-9]\d*(?:ms|s|m)"
+HOSTNAME_PATTERN = (
+    r"(?=.{1,253}\.?$)"
+    r"(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)*"
+    r"[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.?"
+)
+
+
 def target_id(target: dict[str, Any]) -> str:
     labels = target.get("labels") or {}
-    raw = "\0".join(
-        [str(labels.get("category", "")), str(labels.get("title", "")), str(target.get("host", ""))]
-    )
-    return hashlib.sha256(raw.encode()).hexdigest()[:16]
+    parts = [str(labels.get("category", "")), str(labels.get("title", "")), str(target.get("host", ""))]
+    # Only remote targets carry the router in the hash, so ids of local
+    # targets stay the same as before routers existed.
+    if target.get("router"):
+        parts.append(str(target["router"]))
+    return hashlib.sha256("\0".join(parts).encode()).hexdigest()[:16]
 
 
 def bool_label(value: Any) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def clean_host(value: str) -> str:
+    value = value.strip()
+    try:
+        ipaddress.ip_address(value)
+        return value
+    except ValueError:
+        if not re.fullmatch(HOSTNAME_PATTERN, value):
+            raise ValueError("Informe um IPv4, IPv6 ou hostname válido")
+        return value.rstrip(".")
+
+
+def clean_name(value: str, what: str) -> str:
+    value = value.strip()
+    if not re.fullmatch(NAME_PATTERN, value):
+        raise ValueError(f"{what} aceita apenas letras, números, '.', '_' e '-'")
+    return value
+
+
+def clean_duration(value: str) -> str:
+    value = value.strip()
+    if value and not re.fullmatch(DURATION_PATTERN, value):
+        raise ValueError("Use uma duração como 500ms, 1s ou 1m")
+    return value
 
 
 class TargetInput(BaseModel):
@@ -62,6 +98,12 @@ class TargetInput(BaseModel):
     size: int = Field(default=56, ge=8, le=9000)
     tos: str = "0x00"
     alerts_enabled: bool = True
+    # Remote ping through a router (empty router = local ICMP from the prober).
+    router: str = ""
+    links: list[str] = Field(default_factory=list)
+    count: int | None = Field(default=None, ge=1, le=100)
+    packet_interval: str = ""
+    timeout: str = ""
 
     @field_validator("title", "category", "menu", "smokeping_name")
     @classmethod
@@ -71,19 +113,23 @@ class TargetInput(BaseModel):
     @field_validator("host")
     @classmethod
     def validate_host(cls, value: str) -> str:
-        value = value.strip()
-        try:
-            ipaddress.ip_address(value)
-            return value
-        except ValueError:
-            hostname_pattern = (
-                r"(?=.{1,253}\.?$)"
-                r"(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)*"
-                r"[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.?"
-            )
-            if not re.fullmatch(hostname_pattern, value):
-                raise ValueError("Informe um IPv4, IPv6 ou hostname válido")
-            return value.rstrip(".")
+        return clean_host(value)
+
+    @field_validator("router")
+    @classmethod
+    def validate_router(cls, value: str) -> str:
+        return clean_name(value, "Roteador") if value.strip() else ""
+
+    @field_validator("links")
+    @classmethod
+    def validate_links(cls, value: list[str]) -> list[str]:
+        names = [clean_name(item, "Link") for item in value]
+        return list(dict.fromkeys(names))
+
+    @field_validator("packet_interval", "timeout")
+    @classmethod
+    def validate_remote_duration(cls, value: str) -> str:
+        return clean_duration(value)
 
     @field_validator("network")
     @classmethod
@@ -102,7 +148,7 @@ class TargetInput(BaseModel):
     @field_validator("interval")
     @classmethod
     def validate_interval(cls, value: str) -> str:
-        if not re.fullmatch(r"[1-9]\d*(?:ms|s|m)", value.strip()):
+        if not re.fullmatch(DURATION_PATTERN, value.strip()):
             raise ValueError("Use um intervalo como 500ms, 1s ou 1m")
         return value.strip()
 
@@ -112,6 +158,119 @@ class TargetInput(BaseModel):
         if not re.fullmatch(r"0x[0-9a-fA-F]{2}", value.strip()):
             raise ValueError("TOS deve estar no formato 0x00")
         return value.lower()
+
+
+class LinkInput(BaseModel):
+    name: str = Field(min_length=1, max_length=63)
+    vpn_instance: str = Field(default="", max_length=31)
+    source: str = ""
+    source6: str = ""
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, value: str) -> str:
+        return clean_name(value, "Nome do link")
+
+    @field_validator("vpn_instance")
+    @classmethod
+    def validate_vpn_instance(cls, value: str) -> str:
+        value = value.strip()
+        if value and not re.fullmatch(r"\S+", value):
+            raise ValueError("VPN instance não pode conter espaços")
+        return value
+
+    @field_validator("source")
+    @classmethod
+    def validate_source(cls, value: str) -> str:
+        value = value.strip()
+        if value and not isinstance(_ip_or_none(value), ipaddress.IPv4Address):
+            raise ValueError("source deve ser um endereço IPv4")
+        return value
+
+    @field_validator("source6")
+    @classmethod
+    def validate_source6(cls, value: str) -> str:
+        value = value.strip()
+        if value and not isinstance(_ip_or_none(value), ipaddress.IPv6Address):
+            raise ValueError("source6 deve ser um endereço IPv6")
+        return value
+
+    @model_validator(mode="after")
+    def require_source(self) -> "LinkInput":
+        if not self.source and not self.source6:
+            raise ValueError(f"Link {self.name}: informe source e/ou source6")
+        return self
+
+
+class RouterInput(BaseModel):
+    name: str = Field(min_length=1, max_length=63)
+    address: str = Field(min_length=1, max_length=260)
+    username: str = Field(min_length=1, max_length=64)
+    password_file: str = ""
+    private_key_file: str = ""
+    known_hosts: str = ""
+    insecure_skip_host_key: bool = False
+    sessions: int = Field(default=5, ge=1, le=20)
+    links: list[LinkInput] = Field(min_length=1)
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, value: str) -> str:
+        return clean_name(value, "Nome do roteador")
+
+    @field_validator("username")
+    @classmethod
+    def validate_username(cls, value: str) -> str:
+        value = value.strip()
+        if not re.fullmatch(r"\S+", value):
+            raise ValueError("Usuário não pode conter espaços")
+        return value
+
+    @field_validator("address")
+    @classmethod
+    def validate_address(cls, value: str) -> str:
+        value = value.strip()
+        match = re.fullmatch(r"\[([0-9a-fA-F:.]+)\](?::(\d+))?", value)
+        if match:
+            host, port = match.group(1), match.group(2)
+            if not isinstance(_ip_or_none(host), ipaddress.IPv6Address):
+                raise ValueError("Endereço IPv6 inválido")
+            host = f"[{host}]"
+        elif value.count(":") > 1:
+            raise ValueError("Use [IPv6]:porta para endereços IPv6")
+        else:
+            host, _, port = value.partition(":")
+            host = clean_host(host)
+        port = port or "22"
+        if not port.isdigit() or not 1 <= int(port) <= 65535:
+            raise ValueError("Porta SSH inválida")
+        return f"{host}:{int(port)}"
+
+    @field_validator("password_file", "private_key_file", "known_hosts")
+    @classmethod
+    def validate_path(cls, value: str) -> str:
+        value = value.strip()
+        if value and not value.startswith("/"):
+            raise ValueError("Use o caminho absoluto dentro do container do prober")
+        return value
+
+    @model_validator(mode="after")
+    def validate_router(self) -> "RouterInput":
+        if bool(self.password_file) == bool(self.private_key_file):
+            raise ValueError("Informe password_file ou private_key_file (apenas um)")
+        if not self.known_hosts and not self.insecure_skip_host_key:
+            raise ValueError("Informe known_hosts ou marque insecure_skip_host_key")
+        names = [link.name for link in self.links]
+        if len(names) != len(set(names)):
+            raise ValueError("Os nomes dos links devem ser únicos")
+        return self
+
+
+def _ip_or_none(value: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    try:
+        return ipaddress.ip_address(value)
+    except ValueError:
+        return None
 
 
 class ConfigStore:
@@ -129,6 +288,8 @@ class ConfigStore:
             document = self.yaml.load(stream) or {}
         if not isinstance(document, dict) or not isinstance(document.get("targets", []), list):
             raise RuntimeError("config.yaml inválido: a chave targets deve ser uma lista")
+        if not isinstance(document.get("routers") or [], list):
+            raise RuntimeError("config.yaml inválido: a chave routers deve ser uma lista")
         document.setdefault("targets", [])
         return document
 
@@ -143,6 +304,7 @@ class ConfigStore:
     def create(self, payload: TargetInput) -> tuple[dict[str, Any], str]:
         with self.lock:
             document = self._read()
+            self._check_router(document, payload)
             candidate = self._to_yaml(payload)
             self._ensure_unique(document["targets"], candidate)
             document["targets"].append(candidate)
@@ -153,6 +315,7 @@ class ConfigStore:
         with self.lock:
             document = self._read()
             index = self._find(document["targets"], item_id)
+            self._check_router(document, payload)
             candidate = self._to_yaml(payload)
             self._ensure_unique(document["targets"], candidate, ignore=index)
             document["targets"][index] = candidate
@@ -189,8 +352,33 @@ class ConfigStore:
             if index == ignore:
                 continue
             old_labels = target.get("labels") or {}
-            if target.get("host") == candidate["host"] and old_labels.get("category") == labels["category"]:
+            if (
+                target.get("host") == candidate["host"]
+                and old_labels.get("category") == labels["category"]
+                and (target.get("router") or "") == (candidate.get("router") or "")
+            ):
                 raise HTTPException(status_code=409, detail="Este host já existe na mesma categoria")
+
+    def _check_router(self, document: Any, payload: TargetInput) -> None:
+        if not payload.router:
+            if payload.links:
+                raise HTTPException(status_code=422, detail="Links só podem ser usados com um roteador")
+            return
+        router = self._router_by_name(document, payload.router)
+        if router is None:
+            raise HTTPException(status_code=422, detail=f"Roteador {payload.router} não existe")
+        links = {str(link.get("name")): link for link in router.get("links") or []}
+        unknown = [name for name in payload.links if name not in links]
+        if unknown:
+            raise HTTPException(status_code=422, detail=f"Links inexistentes em {payload.router}: {', '.join(unknown)}")
+        if self._network(payload.host, payload.network) == "ip6":
+            used = payload.links or list(links)
+            missing = [name for name in used if not links[name].get("source6")]
+            if missing:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"Destino IPv6 exige source6 nos links: {', '.join(missing)}",
+                )
 
     @staticmethod
     def _network(host: str, requested: str) -> str:
@@ -211,15 +399,29 @@ class ConfigStore:
             "smokeping_name": payload.smokeping_name or self._slug(payload.title, payload.host),
             "alerts_enabled": "true" if payload.alerts_enabled else "false",
         }
-        return {
-            "host": payload.host,
-            "interval": payload.interval,
-            "network": self._network(payload.host, payload.network),
-            "protocol": payload.protocol,
-            "size": payload.size,
-            "tos": payload.tos,
-            "labels": labels,
-        }
+        target: dict[str, Any] = {"host": payload.host}
+        if payload.router:
+            target["router"] = payload.router
+        target.update(
+            {
+                "interval": payload.interval,
+                "network": self._network(payload.host, payload.network),
+                "protocol": payload.protocol,
+                "size": payload.size,
+                "tos": payload.tos,
+            }
+        )
+        if payload.router:
+            if payload.links:
+                target["links"] = list(payload.links)
+            if payload.count is not None:
+                target["count"] = payload.count
+            if payload.packet_interval:
+                target["packet_interval"] = payload.packet_interval
+            if payload.timeout:
+                target["timeout"] = payload.timeout
+        target["labels"] = labels
+        return target
 
     @staticmethod
     def _slug(title: str, host: str) -> str:
@@ -243,6 +445,145 @@ class ConfigStore:
             "interval": str(target.get("interval", "1s")),
             "size": int(target.get("size", 56)),
             "tos": str(target.get("tos", "0x00")),
+            "router": str(target.get("router") or ""),
+            "links": [str(link) for link in target.get("links") or []],
+            "count": int(target["count"]) if target.get("count") is not None else None,
+            "packet_interval": str(target.get("packet_interval") or ""),
+            "timeout": str(target.get("timeout") or ""),
+        }
+
+    # --- routers -----------------------------------------------------------
+
+    def routers(self) -> list[dict[str, Any]]:
+        with self.lock:
+            document = self._read()
+            return [self._serialize_router(item, document["targets"]) for item in document.get("routers") or []]
+
+    def create_router(self, payload: RouterInput) -> tuple[dict[str, Any], str]:
+        with self.lock:
+            document = self._read()
+            if self._router_by_name(document, payload.name) is not None:
+                raise HTTPException(status_code=409, detail=f"Já existe um roteador chamado {payload.name}")
+            candidate = self._router_to_yaml(payload)
+            self._routers_list(document).append(candidate)
+            warning = self._commit(document)
+            return self._serialize_router(candidate, document["targets"]), warning
+
+    def update_router(self, name: str, payload: RouterInput) -> tuple[dict[str, Any], str]:
+        with self.lock:
+            document = self._read()
+            routers = self._routers_list(document)
+            index = self._find_router(routers, name)
+            if payload.name != name and self._router_by_name(document, payload.name) is not None:
+                raise HTTPException(status_code=409, detail=f"Já existe um roteador chamado {payload.name}")
+            kept_links = {link.name for link in payload.links}
+            users = [t for t in document["targets"] if str(t.get("router") or "") == name]
+            orphaned = sorted(
+                {str(link) for t in users for link in t.get("links") or [] if str(link) not in kept_links}
+            )
+            if orphaned:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Links ainda usados por destinos: {', '.join(orphaned)}",
+                )
+            candidate = self._router_to_yaml(payload)
+            routers[index] = candidate
+            for target in users:
+                target["router"] = payload.name
+            warning = self._commit(document)
+            return self._serialize_router(candidate, document["targets"]), warning
+
+    def delete_router(self, name: str) -> str:
+        with self.lock:
+            document = self._read()
+            routers = self._routers_list(document)
+            index = self._find_router(routers, name)
+            used = sum(1 for t in document["targets"] if str(t.get("router") or "") == name)
+            if used:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"{used} destino(s) ainda usam o roteador {name}",
+                )
+            routers.pop(index)
+            if not routers:
+                del document["routers"]
+            return self._commit(document)
+
+    @staticmethod
+    def _router_by_name(document: Any, name: str) -> Any:
+        for router in document.get("routers") or []:
+            if str(router.get("name")) == name:
+                return router
+        return None
+
+    @staticmethod
+    def _find_router(routers: list[Any], name: str) -> int:
+        for index, router in enumerate(routers):
+            if str(router.get("name")) == name:
+                return index
+        raise HTTPException(status_code=404, detail="Roteador não encontrado")
+
+    @staticmethod
+    def _routers_list(document: Any) -> list[Any]:
+        if document.get("routers") is None:
+            # Keep routers above targets, as in the prober docs.
+            if hasattr(document, "insert"):
+                document.insert(0, "routers", [])
+            else:
+                items = list(document.items())
+                document.clear()
+                document["routers"] = []
+                document.update(items)
+        return document["routers"]
+
+    @staticmethod
+    def _router_to_yaml(payload: RouterInput) -> dict[str, Any]:
+        router: dict[str, Any] = {
+            "name": payload.name,
+            "address": payload.address,
+            "username": payload.username,
+        }
+        if payload.password_file:
+            router["password_file"] = payload.password_file
+        else:
+            router["private_key_file"] = payload.private_key_file
+        if payload.insecure_skip_host_key:
+            router["insecure_skip_host_key"] = True
+        else:
+            router["known_hosts"] = payload.known_hosts
+        router["sessions"] = payload.sessions
+        links = []
+        for link in payload.links:
+            item: dict[str, Any] = {"name": link.name}
+            for key in ("vpn_instance", "source", "source6"):
+                if getattr(link, key):
+                    item[key] = getattr(link, key)
+            links.append(item)
+        router["links"] = links
+        return router
+
+    @staticmethod
+    def _serialize_router(router: dict[str, Any], targets: list[Any]) -> dict[str, Any]:
+        name = str(router.get("name", ""))
+        return {
+            "name": name,
+            "address": str(router.get("address", "")),
+            "username": str(router.get("username", "")),
+            "password_file": str(router.get("password_file") or ""),
+            "private_key_file": str(router.get("private_key_file") or ""),
+            "known_hosts": str(router.get("known_hosts") or ""),
+            "insecure_skip_host_key": bool(router.get("insecure_skip_host_key", False)),
+            "sessions": int(router.get("sessions", 5)),
+            "links": [
+                {
+                    "name": str(link.get("name", "")),
+                    "vpn_instance": str(link.get("vpn_instance") or ""),
+                    "source": str(link.get("source") or ""),
+                    "source6": str(link.get("source6") or ""),
+                }
+                for link in router.get("links") or []
+            ],
+            "targets": sum(1 for t in targets if str(t.get("router") or "") == name),
         }
 
     def _commit(self, document: Any) -> str:
@@ -292,19 +633,27 @@ class PrometheusClient:
         return body["data"]["result"]
 
     @staticmethod
-    def keyed(rows: list[dict[str, Any]]) -> dict[tuple[str, str, str], float]:
-        result: dict[tuple[str, str, str], float] = {}
+    def keyed(
+        rows: list[dict[str, Any]], names: tuple[str, ...] = ("host", "title", "category", "link")
+    ) -> dict[tuple[str, ...], float]:
+        result: dict[tuple[str, ...], float] = {}
         for row in rows:
             labels = row.get("metric", {})
-            key = (labels.get("host", ""), labels.get("title", ""), labels.get("category", ""))
+            key = tuple(labels.get(name, "") for name in names)
             try:
                 result[key] = float(row["value"][1])
             except (KeyError, TypeError, ValueError):
                 continue
         return result
 
-    def metrics(self) -> tuple[dict[tuple[str, str, str], dict[str, float]], str]:
-        group = "host,title,category"
+    def metrics(self) -> tuple[dict[tuple[str, str, str, bool], dict[str, Any]], str]:
+        """Metrics per target, keyed by (host, title, category, remote).
+
+        Remote (router) series carry a ``link`` label, one series per uplink;
+        they are aggregated per target and also returned per link, so a bad
+        uplink isn't hidden by a healthy one.
+        """
+        group = "host,title,category,link"
         sent = f"sum by ({group}) (increase(smokeping_requests_total[{METRIC_WINDOW}]))"
         received = f"sum by ({group}) (increase(smokeping_response_duration_seconds_count[{METRIC_WINDOW}]))"
         duration = f"sum by ({group}) (increase(smokeping_response_duration_seconds_sum[{METRIC_WINDOW}]))"
@@ -319,20 +668,52 @@ class PrometheusClient:
             LOG.warning("Prometheus unavailable: %s", exc)
             return {}, str(exc)
 
-        output: dict[tuple[str, str, str], dict[str, float]] = {}
+        grouped: dict[tuple[str, str, str, bool], list[tuple[str, float, float, float, float]]] = {}
         for key, samples in sent_values.items():
-            replies = received_values.get(key, 0)
-            total_seconds = duration_values.get(key, 0)
-            loss = max(0.0, min(100.0, 100 * (1 - replies / samples))) if samples > 0 else 0
-            latency = 1000 * total_seconds / replies if replies > 0 else 0
+            host, title, category, link = key
             jitter = 1000 * max(0.0, p95_values.get(key, 0) - p50_values.get(key, 0))
-            output[key] = {
-                "samples": round(samples, 1),
-                "loss": round(loss, 2),
-                "latency": round(latency, 2),
-                "jitter": round(jitter, 2),
-            }
+            grouped.setdefault((host, title, category, bool(link)), []).append(
+                (link, samples, received_values.get(key, 0), duration_values.get(key, 0), jitter)
+            )
+
+        output: dict[tuple[str, str, str, bool], dict[str, Any]] = {}
+        for key, rows in grouped.items():
+            values = self._summary(
+                sum(r[1] for r in rows), sum(r[2] for r in rows), sum(r[3] for r in rows), max(r[4] for r in rows)
+            )
+            if key[3]:
+                values["links"] = [
+                    {"name": link, **self._summary(sent, replies, seconds, jitter)}
+                    for link, sent, replies, seconds, jitter in sorted(rows)
+                ]
+            output[key] = values
         return output, ""
+
+    @staticmethod
+    def _summary(samples: float, replies: float, total_seconds: float, jitter: float) -> dict[str, float]:
+        loss = max(0.0, min(100.0, 100 * (1 - replies / samples))) if samples > 0 else 0
+        latency = 1000 * total_seconds / replies if replies > 0 else 0
+        return {
+            "samples": round(samples, 1),
+            "loss": round(loss, 2),
+            "latency": round(latency, 2),
+            "jitter": round(jitter, 2),
+        }
+
+    def router_health(self) -> dict[str, dict[str, float]]:
+        try:
+            sessions = self.keyed(self.query("sum by (router) (smokeping_remote_sessions_up)"), ("router",))
+            errors = self.keyed(
+                self.query(f"sum by (router) (increase(smokeping_remote_errors_total[{METRIC_WINDOW}]))"),
+                ("router",),
+            )
+        except Exception as exc:
+            LOG.warning("Prometheus unavailable: %s", exc)
+            return {}
+        return {
+            key[0]: {"sessions_up": sessions.get(key, 0), "errors": round(errors.get(key, 0), 1)}
+            for key in set(sessions) | set(errors)
+        }
 
 
 def reload_prober() -> str:
@@ -386,7 +767,7 @@ def list_targets() -> dict[str, Any]:
     targets = store.list()
     metric_values, metric_error = prometheus.metrics()
     for target in targets:
-        key = (target["host"], target["title"], target["category"])
+        key = (target["host"], target["title"], target["category"], bool(target["router"]))
         target["metrics"] = metric_values.get(key)
         target["status"] = metric_status(target["metrics"])
     return {
@@ -397,10 +778,11 @@ def list_targets() -> dict[str, Any]:
     }
 
 
-def metric_status(metrics: dict[str, float] | None) -> str:
+def metric_status(metrics: dict[str, Any] | None) -> str:
     if not metrics:
         return "unknown"
-    loss = metrics["loss"]
+    # A remote target is as bad as its worst uplink.
+    loss = max([metrics["loss"], *(link["loss"] for link in metrics.get("links", []))])
     if loss >= DOWN_LOSS:
         return "down"
     if loss >= CRITICAL_LOSS:
@@ -435,6 +817,33 @@ def toggle_alert(item_id: str, payload: ToggleInput) -> dict[str, Any]:
 @app.delete("/api/targets/{item_id}", dependencies=[Depends(authenticate)])
 def delete_target(item_id: str) -> dict[str, str]:
     warning = store.delete(item_id)
+    return {"status": "deleted", "warning": warning}
+
+
+@app.get("/api/routers", dependencies=[Depends(authenticate)])
+def list_routers() -> dict[str, Any]:
+    routers = store.routers()
+    health = prometheus.router_health()
+    for router in routers:
+        router["health"] = health.get(router["name"])
+    return {"routers": routers}
+
+
+@app.post("/api/routers", status_code=201, dependencies=[Depends(authenticate)])
+def create_router(payload: RouterInput) -> dict[str, Any]:
+    router, warning = store.create_router(payload)
+    return {"router": router, "warning": warning}
+
+
+@app.put("/api/routers/{name}", dependencies=[Depends(authenticate)])
+def update_router(name: str, payload: RouterInput) -> dict[str, Any]:
+    router, warning = store.update_router(name, payload)
+    return {"router": router, "warning": warning}
+
+
+@app.delete("/api/routers/{name}", dependencies=[Depends(authenticate)])
+def delete_router(name: str) -> dict[str, str]:
+    warning = store.delete_router(name)
     return {"status": "deleted", "warning": warning}
 
 
