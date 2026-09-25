@@ -1,58 +1,73 @@
 {
-  "annotations": [
-    {
-      "kind": "AnnotationQuery",
-      "spec": {
-        "builtIn": true,
-        "enable": true,
-        "hide": true,
-        "iconColor": "rgba(0, 211, 255, 1)",
-        "name": "Annotations & Alerts",
-        "query": {
-          "datasource": {
-            "name": "grafana"
-          },
-          "group": "grafana",
-          "kind": "DataQuery",
-          "spec": {
-            "limit": 100,
-            "matchAny": false,
-            "tags": [],
-            "type": "dashboard"
+  "apiVersion": "dashboard.grafana.app/v2",
+  "kind": "Dashboard",
+  "metadata": {
+    "name": "smokeping-prober",
+    "namespace": "default",
+    "uid": "48ed9eab-b6b2-45e1-8619-83489f425e54",
+    "resourceVersion": "1787772528628993",
+    "generation": 2,
+    "creationTimestamp": "2026-08-26T19:28:00Z",
+    "labels": {
+      "grafana.app/deprecatedInternalID": "3025351172767744"
+    }
+  },
+  "spec": {
+    "annotations": [
+      {
+        "kind": "AnnotationQuery",
+        "spec": {
+          "query": {
+            "kind": "DataQuery",
+            "group": "grafana",
+            "version": "v0",
+            "datasource": {
+              "name": "grafana"
+            },
+            "spec": {
+              "limit": 100,
+              "matchAny": false,
+              "tags": [],
+              "type": "dashboard"
+            }
           },
           "version": "v0"
         }
       }
-    }
-  ],
-  "cursorSync": "Crosshair",
-  "description": "Smoke Ping using https://github.com/SuperQ/smokeping_prober\r\nwith \r\nlatency heatmap\r\nlatency graph per uplink (link label)\r\npacket loss graph per uplink\r\nremote collection health\r\n",
-  "editable": true,
-  "elements": {
-    "panel-2": {
-      "kind": "Panel",
-      "spec": {
-        "data": {
-          "kind": "QueryGroup",
-          "spec": {
-            "queries": [
-              {
-                "kind": "PanelQuery",
-                "spec": {
-                  "hidden": false,
-                  "query": {
-                    "datasource": {
-                      "name": "afwcksz8b71tse"
-                    },
-                    "group": "prometheus",
-                    "kind": "DataQuery",
-                    "spec": {
-                      "editorMode": "code",
-                      "expr": "sum(rate(smokeping_response_duration_seconds_bucket{category=\"$categoria\",title=\"${target:raw}\",link=~\"$link\"}[5m])) by (le)",
-                      "format": "heatmap",
-                      "intervalFactor": 1,
-                      "legendFormat": "{{le}}",
-                      "range": true
+    ],
+    "cursorSync": "Off",
+    "description": "",
+    "editable": true,
+    "elements": {
+      "panel-2": {
+        "kind": "Panel",
+        "spec": {
+          "id": 2,
+          "title": "Smoke Ping - $target",
+          "description": "",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "smokeping-prometheus"
+                      },
+                      "spec": {
+                        "editorMode": "code",
+                        "expr": "sum(rate(smokeping_response_duration_seconds_bucket{category=\"$categoria\",title=\"${target:raw}\"}[5m])) by (le)",
+                        "format": "heatmap",
+                        "intervalFactor": 1,
+                        "legendFormat": "{{le}}",
+                        "range": true
+                      }
                     },
                     "version": "v0"
                   },
@@ -191,52 +206,59 @@
             "queryOptions": {},
             "transformations": []
           }
-        },
-        "description": "Perda de pacotes por link nos últimos 5 minutos. A linha tracejada é o número de pacotes perdidos na janela. Falhas do prober (SSH, timeout, parse) não aparecem aqui; veja Saúde da coleta remota.",
-        "id": 4,
-        "links": [],
-        "title": "Packet Loss por link - $target",
-        "vizConfig": {
-          "group": "timeseries",
-          "kind": "VizConfig",
-          "spec": {
-            "fieldConfig": {
-              "defaults": {
-                "color": {
-                  "mode": "palette-classic"
+        }
+      },
+      "panel-4": {
+        "kind": "Panel",
+        "spec": {
+          "id": 4,
+          "title": "Packet Loss - $target",
+          "description": "",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "smokeping-prometheus"
+                      },
+                      "spec": {
+                        "editorMode": "code",
+                        "expr": "(smokeping_requests_total{category=\"$categoria\",title=\"${target:raw}\"} - smokeping_response_duration_seconds_count{category=\"$categoria\",title=\"${target:raw}\"}) / smokeping_requests_total{category=\"$categoria\",title=\"${target:raw}\"}",
+                        "legendFormat": "Percentage",
+                        "range": true
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
                 },
-                "custom": {
-                  "axisBorderShow": false,
-                  "axisCenteredZero": false,
-                  "axisColorMode": "text",
-                  "axisLabel": "Loss %",
-                  "axisPlacement": "auto",
-                  "barAlignment": 0,
-                  "barWidthFactor": 0.6,
-                  "drawStyle": "line",
-                  "fillOpacity": 10,
-                  "gradientMode": "none",
-                  "hideFrom": {
-                    "legend": false,
-                    "tooltip": false,
-                    "viz": false
-                  },
-                  "insertNulls": false,
-                  "lineInterpolation": "linear",
-                  "lineWidth": 1,
-                  "pointSize": 5,
-                  "scaleDistribution": {
-                    "type": "linear"
-                  },
-                  "showPoints": "never",
-                  "showValues": false,
-                  "spanNulls": false,
-                  "stacking": {
-                    "group": "A",
-                    "mode": "none"
-                  },
-                  "thresholdsStyle": {
-                    "mode": "off"
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "smokeping-prometheus"
+                      },
+                      "spec": {
+                        "editorMode": "code",
+                        "expr": "smokeping_requests_total{category=\"$categoria\",title=\"${target:raw}\"} - smokeping_response_duration_seconds_count{category=\"$categoria\",title=\"${target:raw}\"}",
+                        "legendFormat": "Count",
+                        "range": true
+                      }
+                    },
+                    "refId": "B",
+                    "hidden": false
                   }
                 },
                 "min": 0,
@@ -318,22 +340,34 @@
           },
           "version": "13.1.3"
         }
-      }
-    },
-    "panel-5": {
-      "kind": "Panel",
-      "spec": {
-        "data": {
-          "kind": "QueryGroup",
-          "spec": {
-            "queries": [
-              {
-                "kind": "PanelQuery",
-                "spec": {
-                  "hidden": false,
-                  "query": {
-                    "datasource": {
-                      "name": "afwcksz8b71tse"
+      },
+      "panel-5": {
+        "kind": "Panel",
+        "spec": {
+          "id": 5,
+          "title": "Latency - $target",
+          "description": "",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "smokeping-prometheus"
+                      },
+                      "spec": {
+                        "editorMode": "code",
+                        "expr": "smokeping_response_duration_seconds_sum{category=\"$categoria\",title=\"${target:raw}\"} / smokeping_response_duration_seconds_count{category=\"$categoria\",title=\"${target:raw}\"}",
+                        "legendFormat": "{{host}}",
+                        "range": true
+                      }
                     },
                     "group": "prometheus",
                     "kind": "DataQuery",
@@ -1107,12 +1141,21 @@
           "datasource": {
             "name": "afwcksz8b71tse"
           },
-          "group": "prometheus",
-          "kind": "DataQuery",
-          "spec": {
-            "qryType": 1,
-            "query": "label_values(smokeping_requests_total{category=\"$categoria\"},title)",
-            "refId": "PrometheusVariableQueryEditor-VariableQuery"
+          "hide": "dontHide",
+          "refresh": "onDashboardLoad",
+          "skipUrlSync": false,
+          "query": {
+            "kind": "DataQuery",
+            "group": "prometheus",
+            "version": "v0",
+            "datasource": {
+              "name": "smokeping-prometheus"
+            },
+            "spec": {
+              "qryType": 1,
+              "query": "label_values(smokeping_requests_total,category)",
+              "refId": "PrometheusVariableQueryEditor-VariableQuery"
+            }
           },
           "version": "v0"
         },
@@ -1146,12 +1189,21 @@
           "datasource": {
             "name": "afwcksz8b71tse"
           },
-          "group": "prometheus",
-          "kind": "DataQuery",
-          "spec": {
-            "qryType": 1,
-            "query": "label_values(smokeping_requests_total{category=\"$categoria\"},link)",
-            "refId": "PrometheusVariableQueryEditor-VariableQuery"
+          "hide": "dontHide",
+          "refresh": "onDashboardLoad",
+          "skipUrlSync": false,
+          "query": {
+            "kind": "DataQuery",
+            "group": "prometheus",
+            "version": "v0",
+            "datasource": {
+              "name": "smokeping-prometheus"
+            },
+            "spec": {
+              "qryType": 1,
+              "query": "label_values(smokeping_requests_total{category=\"$categoria\"},title)",
+              "refId": "PrometheusVariableQueryEditor-VariableQuery"
+            }
           },
           "version": "v0"
         },
@@ -1161,6 +1213,6 @@
         "skipUrlSync": false,
         "sort": "alphabeticalAsc"
       }
-    }
-  ]
+    ]
+  }
 }
