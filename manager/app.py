@@ -19,6 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 from pydantic import BaseModel, Field, field_validator, model_validator
 from ruamel.yaml import YAML
+from ruamel.yaml.scalarint import HexInt
 
 
 LOG = logging.getLogger("smokeping-manager")
@@ -59,6 +60,13 @@ def target_id(target: dict[str, Any]) -> str:
 
 def bool_label(value: Any) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def tos_text(value: Any) -> str:
+    # ruamel loads a bare 0x00 as HexInt, whose str() is "0".
+    if isinstance(value, int):
+        return f"0x{value:02x}"
+    return str(value).strip("'\"")
 
 
 def clean_host(value: str) -> str:
@@ -408,7 +416,8 @@ class ConfigStore:
                 "network": self._network(payload.host, payload.network),
                 "protocol": payload.protocol,
                 "size": payload.size,
-                "tos": payload.tos,
+                # HexInt dumps as a bare 0x00; a str would be quoted ('0x00').
+                "tos": HexInt(int(payload.tos, 16), width=2),
             }
         )
         if payload.router:
@@ -444,7 +453,7 @@ class ConfigStore:
             "protocol": str(target.get("protocol", "icmp")),
             "interval": str(target.get("interval", "1s")),
             "size": int(target.get("size", 56)),
-            "tos": str(target.get("tos", "0x00")),
+            "tos": tos_text(target.get("tos", 0)),
             "router": str(target.get("router") or ""),
             "links": [str(link) for link in target.get("links") or []],
             "count": int(target["count"]) if target.get("count") is not None else None,

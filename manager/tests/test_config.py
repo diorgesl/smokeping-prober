@@ -152,6 +152,16 @@ class ConfigStoreTest(unittest.TestCase):
         self.assertEqual({"viams": 0, "brdigital": 50}, {link["name"]: link["loss"] for link in remote["links"]})
         self.assertEqual("critical", metric_status(remote))
 
+    @patch("app.reload_prober", return_value="")
+    def test_tos_is_written_unquoted(self, _reload):
+        self.path.write_text("targets:\n  - host: 1.1.1.1\n    tos: 0x00\n    labels: {title: A, category: DNS}\n", encoding="utf-8")
+        self.assertEqual("0x00", self.store.list()[0]["tos"])
+        self.store.create(TargetInput(title="Google", host="8.8.8.8", category="DNS", tos="0xB8"))
+        text = self.path.read_text(encoding="utf-8")
+        self.assertIn("tos: 0xb8\n", text)
+        self.assertNotIn("'0x", text)
+        self.assertEqual(["0x00", "0xb8"], [t["tos"] for t in self.store.list()])
+
     def test_target_id_is_stable(self):
         target = {"host": "1.1.1.1", "labels": {"title": "Cloudflare", "category": "DNS"}}
         self.assertEqual(target_id(target), target_id(target))
