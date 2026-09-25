@@ -6,6 +6,10 @@
 # Runtime config managed by smokeping-manager (real targets + auto-backups)
 config/config.yaml
 config/backups/
+# Router SSH credentials read by the prober (routers: password_file/private_key_file/known_hosts)
+config/*.pass
+config/*.key
+config/known_hosts
 
 # Python
 __pycache__/

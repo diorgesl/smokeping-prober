@@ -7,7 +7,7 @@
   <title>SmokePing Manager</title>
   <link rel="stylesheet" href="/static/style.css">
 </head>
-<body>
+<body data-window="{{ metric_window }}">
   <div class="shell">
     <header class="topbar">
       <div class="brand">
@@ -24,6 +24,12 @@
     </header>
 
     <main>
+      <nav class="tabs" aria-label="Seções">
+        <button type="button" class="tab active" data-view="targets" aria-pressed="true">Destinos</button>
+        <button type="button" class="tab" data-view="routers" aria-pressed="false">Roteadores <span id="routerCount"></span></button>
+      </nav>
+
+      <div id="targetsView">
       <section class="intro">
         <div>
           <span class="eyebrow">MONITORAMENTO DE REDE</span>
@@ -56,6 +62,24 @@
         <h2>Nenhum destino encontrado</h2>
         <p>Altere os filtros ou adicione seu primeiro destino.</p>
       </section>
+      </div>
+
+      <div id="routersView" class="hidden">
+        <section class="intro">
+          <div>
+            <span class="eyebrow">PING REMOTO</span>
+            <h1>Roteadores</h1>
+            <p>Roteadores Huawei VRP acessados via SSH. Cada link (VRF/VPN instance) gera uma série própria para o mesmo destino.</p>
+          </div>
+          <button class="button primary" id="addRouterButton" type="button"><span>＋</span> Novo roteador</button>
+        </section>
+        <section class="cards" id="routerCards" aria-live="polite"></section>
+        <section class="empty hidden" id="routerEmpty">
+          <span>⇄</span>
+          <h2>Nenhum roteador cadastrado</h2>
+          <p>Cadastre um roteador para pingar destinos a partir dos seus uplinks.</p>
+        </section>
+      </div>
     </main>
   </div>
 
@@ -72,10 +96,21 @@
         <label>Categoria<input name="category" required list="categoryOptions" placeholder="DNS"></label>
         <datalist id="categoryOptions"></datalist>
         <label>Identificador SmokePing<input name="smokeping_name" maxlength="120" placeholder="Gerado automaticamente"></label>
+        <label>Origem do ping<select name="router" id="routerSelect"><option value="">Local (prober)</option></select></label>
         <label>Família de rede<select name="network"><option value="auto">Automática</option><option value="ip4">IPv4</option><option value="ip6">IPv6</option></select></label>
         <label>Intervalo<input name="interval" value="1s" required pattern="[1-9][0-9]*(ms|s|m)"></label>
         <label>Tamanho do pacote<input name="size" type="number" min="8" max="9000" value="56" required></label>
         <label>TOS<input name="tos" value="0x00" required pattern="0x[0-9a-fA-F]{2}"></label>
+        <fieldset class="remote-fields wide hidden" id="remoteFields">
+          <legend>Ping pelo roteador</legend>
+          <div class="link-choices wide">
+            <span>Links usados <small>(nenhum marcado = todos)</small></span>
+            <div id="linkChoices"></div>
+          </div>
+          <label>Pacotes por rodada<input name="count" type="number" min="1" max="100" placeholder="10"></label>
+          <label>Intervalo entre pacotes<input name="packet_interval" placeholder="50ms" pattern="[1-9][0-9]*(ms|s|m)"></label>
+          <label>Timeout por resposta<input name="timeout" placeholder="500ms" pattern="[1-9][0-9]*(ms|s|m)"></label>
+        </fieldset>
         <label class="switch-row wide">
           <span><b>Alertas deste destino</b><small>Inclui o target no Alert Engine e nos diagnósticos MTR.</small></span>
           <input name="alerts_enabled" type="checkbox" checked role="switch">
@@ -89,9 +124,40 @@
     </form>
   </dialog>
 
+  <dialog id="routerDialog">
+    <form id="routerForm" method="dialog">
+      <div class="dialog-head">
+        <div><span class="eyebrow">PING REMOTO</span><h2 id="routerDialogTitle">Novo roteador</h2></div>
+        <button class="close" id="closeRouterDialog" type="button" aria-label="Fechar">×</button>
+      </div>
+      <input id="routerOriginal" type="hidden">
+      <div class="form-grid">
+        <label>Nome<input name="name" required maxlength="63" pattern="[A-Za-z0-9][A-Za-z0-9_.\-]*" placeholder="ne8k"></label>
+        <label>Endereço SSH<input name="address" required placeholder="10.0.0.1:22"></label>
+        <label>Usuário<input name="username" required maxlength="64" placeholder="smokeping"></label>
+        <label>Sessões SSH<input name="sessions" type="number" min="1" max="20" value="5" required></label>
+        <label>Autenticação<select name="auth"><option value="password_file">Arquivo de senha</option><option value="private_key_file">Chave privada</option></select></label>
+        <label>Caminho no prober<input name="auth_path" required placeholder="/etc/smokeping_prober/ne8k.pass"></label>
+        <label class="wide">known_hosts<input name="known_hosts" placeholder="/etc/smokeping_prober/known_hosts"></label>
+        <label class="switch-row wide">
+          <span><b>Ignorar verificação da host key</b><small>insecure_skip_host_key: use só em laboratório.</small></span>
+          <input name="insecure_skip_host_key" type="checkbox" role="switch">
+        </label>
+        <div class="links-editor wide">
+          <div class="links-head"><b>Links / VRFs</b><button class="button ghost small" id="addLinkButton" type="button">＋ Adicionar link</button></div>
+          <div id="linkRows"></div>
+        </div>
+      </div>
+      <div class="dialog-actions">
+        <button class="button ghost" id="cancelRouterDialog" type="button">Cancelar</button>
+        <button class="button primary" type="submit"><span id="routerSpinner" class="spinner hidden"></span> Salvar roteador</button>
+      </div>
+    </form>
+  </dialog>
+
   <dialog class="confirm-dialog" id="deleteDialog">
     <div class="confirm-icon">!</div>
-    <h2>Excluir destino?</h2>
+    <h2 id="deleteTitle">Excluir destino?</h2>
     <p id="deleteText"></p>
     <div class="dialog-actions">
       <button class="button ghost" id="cancelDelete" type="button">Cancelar</button>
