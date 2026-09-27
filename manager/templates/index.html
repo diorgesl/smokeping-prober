@@ -152,6 +152,29 @@
     </form>
   </dialog>
 
+  <dialog class="chart-dialog" id="chartDialog">
+    <div class="chart-body">
+      <div class="dialog-head">
+        <div><span class="eyebrow">HISTÓRICO</span><h2 id="chartTitle">Destino</h2><div class="host" id="chartHost"></div></div>
+        <button class="close" id="closeChart" type="button" aria-label="Fechar">×</button>
+      </div>
+      <div class="chart-toolbar">
+        <div class="tabs chart-range" role="group" aria-label="Período">
+          <button type="button" class="tab active" data-range="1h" aria-pressed="true">1h</button>
+          <button type="button" class="tab" data-range="6h" aria-pressed="false">6h</button>
+          <button type="button" class="tab" data-range="24h" aria-pressed="false">24h</button>
+        </div>
+        <button class="icon-button" id="chartRefresh" type="button" title="Atualizar gráfico" aria-label="Atualizar gráfico">↻</button>
+      </div>
+      <div class="chart-legend" id="chartLegend"></div>
+      <div class="chart-wrap" id="chartWrap">
+        <svg id="chartSvg" role="img" aria-label="Latência e perda no período"></svg>
+        <div class="chart-tip hidden" id="chartTip"></div>
+        <div class="chart-empty hidden" id="chartEmpty"></div>
+      </div>
+    </div>
+  </dialog>
+
   <dialog class="confirm-dialog" id="deleteDialog">
     <div class="confirm-icon">!</div>
     <h2 id="deleteTitle">Excluir destino?</h2>

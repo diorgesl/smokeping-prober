@@ -45,7 +45,7 @@ function render() {
     const m = t.metrics;
     return `<article class="card ${escapeHtml(t.status)} ${t.alerts_enabled ? "alerts-on" : "alerts-off"}" data-id="${t.id}">
       <div class="card-head"><div><h2>${escapeHtml(t.title)}</h2><div class="host">${escapeHtml(t.host)}</div><span class="badge">${escapeHtml(t.category)}</span>${t.router ? `<span class="badge router">via ${escapeHtml(t.router)}</span>` : ""}</div>
-      <div class="menu"><button class="menu-button" data-action="menu" aria-label="Opções">⋮</button><div class="menu-list hidden"><button data-action="edit">Editar</button><button data-action="duplicate">Copiar</button><button class="delete" data-action="delete">Excluir</button></div></div></div>
+      <div class="menu"><button class="menu-button" data-action="menu" aria-label="Opções">⋮</button><div class="menu-list hidden"><button data-action="chart">Gráfico</button><button data-action="edit">Editar</button><button data-action="duplicate">Copiar</button><button class="delete" data-action="delete">Excluir</button></div></div></div>
       <div class="metrics"><div class="metric"><span>Latência</span><b>${metric(m?.latency," ms")}</b></div><div class="metric"><span>Perda</span><b>${metric(m?.loss,"%")}</b></div><div class="metric"><span>Jitter</span><b>${metric(m?.jitter," ms")}</b></div></div>
       ${linkMetrics(m)}
       <div class="card-foot"><label class="alert-label"><input type="checkbox" role="switch" data-action="toggle" ${t.alerts_enabled ? "checked" : ""}><span>Alertas ${t.alerts_enabled ? "ativos" : "inativos"}</span></label><span class="status ${escapeHtml(t.status)}">● ${statusLabel(t.status)}</span></div>
@@ -99,6 +99,7 @@ function openForm(target=null, {duplicate=false}={}) {
 cards.addEventListener("click", async event => {
   const card=event.target.closest(".card"); if(!card) return; const target=state.targets.find(t=>t.id===card.dataset.id); const action=event.target.dataset.action;
   if(action==="menu") { card.querySelector(".menu-list").classList.toggle("hidden"); return; }
+  if(action==="chart") { card.querySelector(".menu-list").classList.add("hidden"); openChart(target); return; }
   if(action==="edit") { openForm(target); return; }
   if(action==="duplicate") { openForm(target, {duplicate:true}); return; }
   if(action==="delete") { state.deleteKind="target"; state.deleteId=target.id; $("#deleteTitle").textContent="Excluir destino?"; $("#deleteText").textContent=`${target.title} (${target.host}) será removido do config.yaml.`; $("#deleteDialog").showModal(); }
@@ -135,6 +136,132 @@ document.querySelectorAll(".summary-item").forEach(btn=>btn.addEventListener("cl
   render();
 }));
 document.addEventListener("click",e=>{if(!e.target.closest(".menu"))document.querySelectorAll(".menu-list").forEach(m=>m.classList.add("hidden"));});
+
+// --- Gráfico ------------------------------------------------------------------
+
+const chart = { target: null, range: "1h", data: null, seq: 0 };
+const RANGE_SECONDS = { "1h": 3600, "6h": 21600, "24h": 86400 };
+const TICK_SECONDS = { "1h": 600, "6h": 3600, "24h": 10800 };
+// Fixed hue order, validated against the dialog surface: local ping first, then router links.
+const SERIES_COLORS = ["#3987e5","#d95926","#199e70","#c98500","#d55181","#008300","#9085e9","#e66767"];
+const SVG_NS = "http://www.w3.org/2000/svg";
+function svgEl(tag, attrs, parent) { const node = document.createElementNS(SVG_NS, tag); for (const [k,v] of Object.entries(attrs)) node.setAttribute(k, v); parent?.append(node); return node; }
+// Upper bounds whose quarters are round numbers, so the latency ticks read cleanly.
+function niceMax(value) { if (!(value > 0)) return 1; const p = 10 ** Math.floor(Math.log10(value)); return [1,2,4,6,8,10].map(m => m*p).find(n => n >= value); }
+function clock(t, withDate=false) { return new Date(t*1000).toLocaleString("pt-BR", withDate ? {day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"} : {hour:"2-digit",minute:"2-digit"}); }
+function average(values) { const v = values.filter(x => x != null); return v.length ? v.reduce((a,b) => a+b, 0) / v.length : null; }
+// Splits points into runs where `has(point)` holds and no step is missing, so lines break at gaps.
+function runs(points, has, step) {
+  const out = []; let current = [];
+  for (const p of points) {
+    if (!has(p) || (current.length && p.t - current[current.length-1].t > step*1.5)) { if (current.length) out.push(current); current = []; }
+    if (has(p)) current.push(p);
+  }
+  if (current.length) out.push(current);
+  return out;
+}
+function openChart(target) {
+  chart.target = target; chart.data = null;
+  $("#chartTitle").textContent = target.title;
+  $("#chartHost").textContent = target.router ? `${target.host} · via ${target.router}` : target.host;
+  $("#chartSvg").replaceChildren(); $("#chartLegend").replaceChildren();
+  $("#chartDialog").showModal(); loadChart();
+}
+async function loadChart() {
+  const seq = ++chart.seq; $("#chartRefresh").classList.add("loading");
+  try {
+    const data = await api(`/api/targets/${chart.target.id}/history?range=${chart.range}`);
+    if (seq === chart.seq) { chart.data = {...data, end: Date.now()/1000}; drawChart(); }
+  } catch (error) { if (seq === chart.seq) { chart.data = null; drawChart(error.message); } }
+  finally { if (seq === chart.seq) $("#chartRefresh").classList.remove("loading"); }
+}
+function drawChart(errorMessage="") {
+  const svg = $("#chartSvg"), tip = $("#chartTip"); svg.replaceChildren(); tip.classList.add("hidden");
+  // Color follows the series position in the API response, before empty series are dropped.
+  const series = (chart.data?.series || []).map((s,i) => ({...s, label: s.name || "Local", color: SERIES_COLORS[i % SERIES_COLORS.length]})).filter(s => s.points.length);
+  $("#chartEmpty").textContent = errorMessage || "Sem dados neste período.";
+  $("#chartEmpty").classList.toggle("hidden", Boolean(series.length));
+  $("#chartLegend").innerHTML = series.map(s => {
+    const lat = average(s.points.map(p => p.latency)), loss = average(s.points.map(p => p.loss));
+    return `<span class="item"><i class="swatch" style="background:${s.color}"></i><b>${escapeHtml(s.label)}</b> média ${metric(lat," ms")} · perda ${metric(loss,"%")}</span>`;
+  }).join("");
+  if (!series.length) return;
+
+  const single = series.length === 1, step = chart.data.step, end = chart.data.end, start = end - RANGE_SECONDS[chart.data.range];
+  const W = $("#chartWrap").clientWidth || 800, latH = W < 520 ? 160 : 220, lossH = 90, gap = 30;
+  const m = {l: 44, r: 10, t: 22, b: 24}, plotW = W - m.l - m.r, lossTop = m.t + latH + gap, H = lossTop + lossH + m.b;
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`); svg.setAttribute("width", W); svg.setAttribute("height", H);
+  const x = t => m.l + (t - start) / (end - start) * plotW;
+  const all = series.flatMap(s => s.points);
+  const latMax = niceMax(Math.max(...all.map(p => (single ? p.p95 : null) ?? p.latency ?? 0)));
+  const maxLoss = Math.max(...all.map(p => p.loss)), lossMax = [5,10,20,50,100].find(n => n >= maxLoss) ?? 100;
+  const yLat = v => m.t + latH - v / latMax * latH, yLoss = v => lossTop + lossH - v / lossMax * lossH;
+
+  const grid = svgEl("g", {class: "chart-grid"}, svg);
+  svgEl("text", {x: m.l, y: m.t - 9, class: "chart-label"}, grid).textContent = "LATÊNCIA (ms)";
+  svgEl("text", {x: m.l, y: lossTop - 9, class: "chart-label"}, grid).textContent = "PERDA (%)";
+  for (const [ticks, y, top] of [[[0, .25, .5, .75, 1].map(f => f * latMax), yLat, m.t], [[0, .5, 1].map(f => f * lossMax), yLoss, lossTop]]) {
+    for (const v of ticks) {
+      svgEl("line", {x1: m.l, x2: W - m.r, y1: y(v), y2: y(v), class: v ? "" : "base"}, grid);
+      svgEl("text", {x: m.l - 7, y: y(v) + 3, "text-anchor": "end"}, grid).textContent = +v.toFixed(v < 10 ? 1 : 0);
+    }
+  }
+  const every = TICK_SECONDS[chart.data.range] * (W < 520 ? 2 : 1);
+  for (let t = Math.ceil(start / every) * every; t <= end; t += every) {
+    svgEl("line", {x1: x(t), x2: x(t), y1: m.t, y2: lossTop + lossH, class: "vertical"}, grid);
+    svgEl("text", {x: x(t), y: H - 7, "text-anchor": "middle"}, grid).textContent = clock(t);
+  }
+
+  // Loss: bars for the interval each point covers; severity colors when there is only one series.
+  const slot = plotW * step / (end - start), barW = Math.max(1, (slot - 2) / series.length);
+  series.forEach((s, i) => {
+    for (const p of s.points) {
+      if (!p.loss) continue;
+      const attrs = {x: x(p.t - step) + 1 + i * barW, y: yLoss(p.loss), width: barW, height: lossTop + lossH - yLoss(p.loss), rx: Math.min(2, barW / 2)};
+      if (single) attrs.class = p.loss >= 20 ? "bar bad" : p.loss >= 5 ? "bar warn" : "bar low"; else attrs.fill = s.color;
+      svgEl("rect", attrs, svg);
+    }
+  });
+  // Latency: p50–p95 "smoke" band for a single series, average line for each series.
+  for (const s of series) {
+    if (single) for (const run of runs(s.points, p => p.p50 != null && p.p95 != null, step)) {
+      const edge = [...run.map(p => `${x(p.t)},${yLat(p.p95)}`), ...run.reverse().map(p => `${x(p.t)},${yLat(p.p50)}`)];
+      svgEl("polygon", {points: edge.join(" "), fill: s.color, opacity: .22}, svg);
+    }
+    for (const run of runs(s.points, p => p.latency != null, step)) {
+      if (run.length === 1) { svgEl("circle", {cx: x(run[0].t), cy: yLat(run[0].latency), r: 2.5, fill: s.color}, svg); continue; }
+      svgEl("path", {d: run.map((p, i) => `${i ? "L" : "M"}${x(p.t)},${yLat(p.latency)}`).join(""), fill: "none", stroke: s.color, "stroke-width": 2, "stroke-linejoin": "round"}, svg);
+    }
+  }
+
+  // Hover: crosshair on the nearest step plus a tooltip with every series at that time.
+  const times = [...new Set(all.map(p => p.t))].sort((a,b) => a-b);
+  const guide = svgEl("line", {y1: m.t, y2: lossTop + lossH, class: "chart-guide hidden"}, svg);
+  const dots = svgEl("g", {}, svg);
+  const overlay = svgEl("rect", {x: m.l, y: m.t, width: plotW, height: lossTop + lossH - m.t, fill: "transparent"}, svg);
+  overlay.addEventListener("mousemove", event => {
+    const mx = event.clientX - svg.getBoundingClientRect().left, t0 = start + (mx - m.l) / plotW * (end - start);
+    const t = times.reduce((best, t) => Math.abs(t - t0) < Math.abs(best - t0) ? t : best, times[0]);
+    guide.setAttribute("x1", x(t)); guide.setAttribute("x2", x(t)); guide.classList.remove("hidden"); dots.replaceChildren();
+    const rows = series.map(s => {
+      const p = s.points.find(p => p.t === t);
+      if (p?.latency != null) svgEl("circle", {cx: x(t), cy: yLat(p.latency), r: 4, fill: s.color, class: "chart-dot"}, dots);
+      return `<div><i class="swatch" style="background:${s.color}"></i><b>${escapeHtml(s.label)}</b><span>${p ? `${metric(p.latency," ms")} · ${metric(p.loss,"%")} · jitter ${metric(p.jitter," ms")}` : "sem dados"}</span></div>`;
+    });
+    tip.innerHTML = `<time>${clock(t, true)}</time>${rows.join("")}`; tip.classList.remove("hidden");
+    const left = x(t) + 14; tip.style.left = `${left + tip.offsetWidth > W ? x(t) - 14 - tip.offsetWidth : left}px`;
+  });
+  overlay.addEventListener("mouseleave", () => { guide.classList.add("hidden"); dots.replaceChildren(); tip.classList.add("hidden"); });
+}
+document.querySelectorAll(".chart-range .tab").forEach(tab => tab.addEventListener("click", () => {
+  chart.range = tab.dataset.range;
+  document.querySelectorAll(".chart-range .tab").forEach(t => { const active = t === tab; t.classList.toggle("active", active); t.setAttribute("aria-pressed", active); });
+  loadChart();
+}));
+$("#chartRefresh").addEventListener("click", () => loadChart());
+$("#closeChart").addEventListener("click", () => $("#chartDialog").close());
+$("#chartDialog").addEventListener("close", () => { chart.seq++; $("#chartRefresh").classList.remove("loading"); });
+window.addEventListener("resize", () => { if ($("#chartDialog").open && chart.data) drawChart(); });
 
 // --- Roteadores ---------------------------------------------------------------
 
@@ -218,11 +345,11 @@ routerForm.elements.auth.addEventListener("change", e => { routerForm.elements.a
 $("#addRouterButton").addEventListener("click", () => openRouterForm());
 $("#closeRouterDialog").addEventListener("click", () => routerDialog.close()); $("#cancelRouterDialog").addEventListener("click", () => routerDialog.close());
 function showView(view) {
-  document.querySelectorAll(".tab").forEach(t => { const active = t.dataset.view === view; t.classList.toggle("active", active); t.setAttribute("aria-pressed", active); });
+  document.querySelectorAll("nav.tabs .tab").forEach(t => { const active = t.dataset.view === view; t.classList.toggle("active", active); t.setAttribute("aria-pressed", active); });
   $("#targetsView").classList.toggle("hidden", view !== "targets");
   $("#routersView").classList.toggle("hidden", view !== "routers");
 }
-document.querySelectorAll(".tab").forEach(tab => tab.addEventListener("click", () => {
+document.querySelectorAll("nav.tabs .tab").forEach(tab => tab.addEventListener("click", () => {
   showView(tab.dataset.view); history.replaceState(null, "", tab.dataset.view === "routers" ? "#roteadores" : location.pathname);
 }));
 if (location.hash === "#roteadores") showView("routers");

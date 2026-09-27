@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import ipaddress
 import logging
+import math
 import os
 import re
 import shutil
@@ -35,6 +36,10 @@ METRIC_WINDOW = os.getenv("METRIC_WINDOW", "5m")
 WARNING_LOSS = float(os.getenv("WARNING_LOSS_PERCENT", "5"))
 CRITICAL_LOSS = float(os.getenv("CRITICAL_LOSS_PERCENT", "20"))
 DOWN_LOSS = float(os.getenv("DOWN_LOSS_PERCENT", "99.9"))
+# Chart periods: (range in seconds, step in seconds, increase/rate window).
+# The window must cover at least one run of remote targets (1 per minute by
+# default) and a few 15s scrapes, or the chart turns into gaps.
+HISTORY_RANGES = {"1h": (3600, 60, "2m"), "6h": (21600, 300, "5m"), "24h": (86400, 900, "15m")}
 USERNAME = os.getenv("MANAGER_USERNAME", "")
 PASSWORD = os.getenv("MANAGER_PASSWORD", "")
 
@@ -46,6 +51,10 @@ HOSTNAME_PATTERN = (
     r"(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)*"
     r"[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.?"
 )
+
+
+def promql_escape(value: str) -> str:
+    return value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
 
 
 def target_id(target: dict[str, Any]) -> str:
@@ -682,6 +691,84 @@ class PrometheusClient:
             "jitter": round(jitter, 2),
         }
 
+    def query_range(self, expression: str, start: float, end: float, step: int) -> list[dict[str, Any]]:
+        response = self.http.get(
+            f"{PROMETHEUS_URL}/api/v1/query_range",
+            params={"query": expression, "start": start, "end": end, "step": step},
+            timeout=15,
+        )
+        response.raise_for_status()
+        body = response.json()
+        if body.get("status") != "success":
+            raise RuntimeError(body)
+        return body["data"]["result"]
+
+    @staticmethod
+    def keyed_range(rows: list[dict[str, Any]]) -> dict[str, dict[float, float]]:
+        """Matrix rows as {link: {timestamp: value}}, skipping NaN/Inf samples."""
+        result: dict[str, dict[float, float]] = {}
+        for row in rows:
+            series = result.setdefault(row.get("metric", {}).get("link", ""), {})
+            for timestamp, raw in row.get("values", []):
+                try:
+                    value = float(raw)
+                except (TypeError, ValueError):
+                    continue
+                if math.isfinite(value):
+                    series[timestamp] = value
+        return result
+
+    def history(
+        self, host: str, title: str, category: str, range_name: str, now: float | None = None
+    ) -> list[dict[str, Any]]:
+        """Loss/latency/jitter over time for one target, one series per origin.
+
+        The local ping comes first (name ""), then one series per router link.
+        Steps where nothing was sent are left out so the chart shows a gap.
+        """
+        if range_name not in HISTORY_RANGES:
+            raise HTTPException(status_code=422, detail=f"Período inválido: {range_name}")
+        seconds, step, window = HISTORY_RANGES[range_name]
+        end = now if now is not None else datetime.now(timezone.utc).timestamp()
+        start = end - seconds
+        selector = ",".join(
+            f'{name}="{promql_escape(value)}"'
+            for name, value in (("host", host), ("title", title), ("category", category))
+        )
+
+        def run(expression: str) -> dict[str, dict[float, float]]:
+            return self.keyed_range(self.query_range(expression, start, end, step))
+
+        sent = run(f"sum by (link) (increase(smokeping_requests_total{{{selector}}}[{window}]))")
+        received = run(f"sum by (link) (increase(smokeping_response_duration_seconds_count{{{selector}}}[{window}]))")
+        duration = run(f"sum by (link) (increase(smokeping_response_duration_seconds_sum{{{selector}}}[{window}]))")
+        buckets = f"sum by (le,link) (rate(smokeping_response_duration_seconds_bucket{{{selector}}}[{window}]))"
+        p50 = run(f"histogram_quantile(0.50, {buckets})")
+        p95 = run(f"histogram_quantile(0.95, {buckets})")
+
+        def ms(value: float | None) -> float | None:
+            return None if value is None else round(1000 * value, 2)
+
+        series = []
+        for link in sorted(sent):
+            points = []
+            for timestamp, samples in sorted(sent[link].items()):
+                if samples <= 0:
+                    continue
+                replies = received.get(link, {}).get(timestamp, 0)
+                low = p50.get(link, {}).get(timestamp) if replies > 0 else None
+                high = p95.get(link, {}).get(timestamp) if replies > 0 else None
+                points.append({
+                    "t": timestamp,
+                    "loss": round(max(0.0, min(100.0, 100 * (1 - replies / samples))), 2),
+                    "latency": ms(duration.get(link, {}).get(timestamp, 0) / replies) if replies > 0 else None,
+                    "p50": ms(low),
+                    "p95": ms(high),
+                    "jitter": ms(max(0.0, high - low)) if low is not None and high is not None else None,
+                })
+            series.append({"name": link, "points": points})
+        return series
+
     def router_health(self) -> dict[str, dict[str, float]]:
         try:
             sessions = self.keyed(self.query("sum by (router) (smokeping_remote_sessions_up)"), ("router",))
@@ -801,6 +888,21 @@ def toggle_alert(item_id: str, payload: ToggleInput) -> dict[str, Any]:
 def delete_target(item_id: str) -> dict[str, str]:
     warning = store.delete(item_id)
     return {"status": "deleted", "warning": warning}
+
+
+@app.get("/api/targets/{item_id}/history", dependencies=[Depends(authenticate)])
+def target_history(item_id: str, range: str = "1h") -> dict[str, Any]:
+    target = next((item for item in store.list() if item["id"] == item_id), None)
+    if target is None:
+        raise HTTPException(status_code=404, detail="Destino não encontrado")
+    try:
+        series = prometheus.history(target["host"], target["title"], target["category"], range)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        LOG.warning("Prometheus unavailable: %s", exc)
+        raise HTTPException(status_code=502, detail=f"Prometheus indisponível: {exc}")
+    return {"range": range, "step": HISTORY_RANGES[range][1], "series": series}
 
 
 @app.get("/api/routers", dependencies=[Depends(authenticate)])

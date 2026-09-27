@@ -152,6 +152,45 @@ class ConfigStoreTest(unittest.TestCase):
         self.assertIsNone(metrics[("8.8.8.8", "G", "DNS")]["latency"])
         self.assertEqual("critical", metric_status(metrics[("8.8.8.8", "G", "DNS")]))
 
+    def test_history_series_per_link(self):
+        def row(values, link=""):
+            return {"metric": {"link": link} if link else {}, "values": [[t, str(v)] for t, v in values]}
+
+        responses = {
+            "smokeping_requests_total": [row([(60, 100), (120, 100), (180, 0)]), row([(60, 10)], "viams")],
+            "seconds_count": [row([(60, 100), (120, 50)]), row([(60, 0)], "viams")],
+            "seconds_sum": [row([(60, 1), (120, 1)])],
+            "0.50,": [row([(60, 0.008), (120, "NaN")])],
+            "0.95,": [row([(60, 0.012), (120, "NaN")])],
+        }
+        expressions = []
+
+        def query_range(expression, start, end, step):
+            expressions.append(expression)
+            self.assertEqual((3600, 60), (end - start, step))
+            return next((rows for name, rows in responses.items() if name in expression), [])
+
+        client = PrometheusClient()
+        with patch.object(client, "query_range", side_effect=query_range):
+            series = client.history('8.8.8.8', 'Google "DNS"', "D\\NS", "1h", now=10_000)
+
+        self.assertIn('title="Google \\"DNS\\""', expressions[0])
+        self.assertIn('category="D\\\\NS"', expressions[0])
+        self.assertIn("[2m]", expressions[0])
+        self.assertEqual(["", "viams"], [s["name"] for s in series])
+        local = series[0]["points"]
+        # The point with no pings sent is dropped, so the chart shows a gap.
+        self.assertEqual([60, 120], [p["t"] for p in local])
+        self.assertEqual({"t": 60, "loss": 0, "latency": 10, "p50": 8, "p95": 12, "jitter": 4}, local[0])
+        self.assertEqual({"t": 120, "loss": 50, "latency": 20, "p50": None, "p95": None, "jitter": None}, local[1])
+        # Everything lost: loss 100% and no latency.
+        self.assertEqual({"t": 60, "loss": 100, "latency": None, "p50": None, "p95": None, "jitter": None}, series[1]["points"][0])
+
+    def test_history_rejects_unknown_range(self):
+        with self.assertRaises(HTTPException) as caught:
+            PrometheusClient().history("8.8.8.8", "G", "DNS", "7d")
+        self.assertEqual(422, caught.exception.status_code)
+
     @patch("app.reload_prober", return_value="")
     def test_tos_is_written_unquoted(self, _reload):
         self.path.write_text("targets:\n  - host: 1.1.1.1\n    tos: 0x00\n    labels: {title: A, category: DNS}\n", encoding="utf-8")
