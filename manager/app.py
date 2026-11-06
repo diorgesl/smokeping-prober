@@ -120,6 +120,8 @@ class TargetInput(BaseModel):
     size: int = Field(default=56, ge=8, le=9000)
     tos: str = "0x00"
     alerts_enabled: bool = True
+    # Opt-in: only these targets trigger the loss webhook.
+    webhook_enabled: bool = False
     # Remote ping through a router (empty router = local ICMP from the prober).
     router: str = ""
     count: int | None = Field(default=None, ge=1, le=100)
@@ -351,12 +353,12 @@ class ConfigStore:
             warning = self._commit(document)
             return self._serialize(candidate), warning
 
-    def toggle(self, item_id: str, enabled: bool) -> tuple[dict[str, Any], str]:
+    def toggle(self, item_id: str, enabled: bool, label: str = "alerts_enabled") -> tuple[dict[str, Any], str]:
         with self.lock:
             document = self._read()
             index = self._find(document["targets"], item_id)
             target = document["targets"][index]
-            target.setdefault("labels", {})["alerts_enabled"] = "true" if enabled else "false"
+            target.setdefault("labels", {})[label] = "true" if enabled else "false"
             warning = self._commit(document)
             return self._serialize(target), warning
 
@@ -421,6 +423,7 @@ class ConfigStore:
             "title": payload.title,
             "smokeping_name": payload.smokeping_name or self._slug(payload.title, payload.host),
             "alerts_enabled": "true" if payload.alerts_enabled else "false",
+            "webhook_enabled": "true" if payload.webhook_enabled else "false",
         }
         target: dict[str, Any] = {"host": payload.host}
         if payload.router:
@@ -462,6 +465,7 @@ class ConfigStore:
             "menu": str(labels.get("menu", "")),
             "smokeping_name": str(labels.get("smokeping_name", "")),
             "alerts_enabled": bool_label(labels.get("alerts_enabled", "false")),
+            "webhook_enabled": bool_label(labels.get("webhook_enabled", "false")),
             "network": str(target.get("network", "auto")),
             "protocol": str(target.get("protocol", "icmp")),
             "interval": str(target.get("interval", "1s")),
@@ -933,6 +937,8 @@ class WebhookWatcher:
         if error:
             return
         targets, routers = self.store.webhook_context()
+        # Disabled targets drop out here, so the cleanup below also forgets their open incidents.
+        targets = [t for t in targets if t["webhook_enabled"]]
         seen = set()
         for target in targets:
             values = metrics.get((target["host"], target["title"], target["category"]))
@@ -1135,6 +1141,12 @@ def toggle_alert(item_id: str, payload: ToggleInput) -> dict[str, Any]:
     return {"target": target, "warning": warning}
 
 
+@app.patch("/api/targets/{item_id}/webhook", dependencies=[Depends(authenticate)])
+def toggle_webhook(item_id: str, payload: ToggleInput) -> dict[str, Any]:
+    target, warning = store.toggle(item_id, payload.enabled, "webhook_enabled")
+    return {"target": target, "warning": warning}
+
+
 @app.delete("/api/targets/{item_id}", dependencies=[Depends(authenticate)])
 def delete_target(item_id: str) -> dict[str, str]:
     warning = store.delete(item_id)
@@ -1210,7 +1222,8 @@ def test_webhook(payload: WebhookInput) -> dict[str, Any]:
     targets, routers = store.webhook_context()
     if not targets:
         raise HTTPException(status_code=422, detail="Cadastre um destino antes de testar")
-    target = next((t for t in targets if t["router"] in routers), targets[0])
+    # Prefer a target that triggers the webhook, then a remote one.
+    target = min(targets, key=lambda t: (not t["webhook_enabled"], t["router"] not in routers))
     metrics, _ = prometheus.metrics(f"{settings['duration_seconds']}s")
     values = metrics.get((target["host"], target["title"], target["category"]))
     links = routers[target["router"]]["links"] if target["router"] in routers else []

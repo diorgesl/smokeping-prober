@@ -48,7 +48,7 @@ function render() {
       <div class="menu"><button class="menu-button" data-action="menu" aria-label="Opções">⋮</button><div class="menu-list hidden"><button data-action="chart">Gráfico</button><button data-action="edit">Editar</button><button data-action="duplicate">Copiar</button><button class="delete" data-action="delete">Excluir</button></div></div></div>
       <div class="metrics"><div class="metric"><span>Latência</span><b>${metric(m?.latency," ms")}</b></div><div class="metric"><span>Perda</span><b>${metric(m?.loss,"%")}</b></div><div class="metric"><span>Jitter</span><b>${metric(m?.jitter," ms")}</b></div></div>
       ${linkMetrics(m)}
-      <div class="card-foot"><label class="alert-label"><input type="checkbox" role="switch" data-action="toggle" ${t.alerts_enabled ? "checked" : ""}><span>Alertas ${t.alerts_enabled ? "ativos" : "inativos"}</span></label><span class="status ${escapeHtml(t.status)}">● ${statusLabel(t.status)}</span></div>
+      <div class="card-foot"><div class="toggles"><label class="alert-label"><input type="checkbox" role="switch" data-action="toggle" ${t.alerts_enabled ? "checked" : ""}><span>Alertas ${t.alerts_enabled ? "ativos" : "inativos"}</span></label><label class="alert-label"><input type="checkbox" role="switch" data-action="webhook" ${t.webhook_enabled ? "checked" : ""}><span>Webhook ${t.webhook_enabled ? "ativo" : "inativo"}</span></label></div><span class="status ${escapeHtml(t.status)}">● ${statusLabel(t.status)}</span></div>
     </article>`;
   }).join("");
   $("#emptyState").classList.toggle("hidden", visible.length > 0);
@@ -105,13 +105,14 @@ cards.addEventListener("click", async event => {
   if(action==="delete") { state.deleteKind="target"; state.deleteId=target.id; $("#deleteTitle").textContent="Excluir destino?"; $("#deleteText").textContent=`${target.title} (${target.host}) será removido do config.yaml.`; $("#deleteDialog").showModal(); }
 });
 cards.addEventListener("change", async event => {
-  if(event.target.dataset.action!=="toggle") return; const card=event.target.closest(".card"); const enabled=event.target.checked;
-  try { const result=await api(`/api/targets/${card.dataset.id}/alerts`,{method:"PATCH",body:JSON.stringify({enabled})}); toast(enabled?"Alertas ativados":"Alertas desativados"); if(result.warning) toast(`Configuração salva, mas o reload falhou: ${result.warning}`,true); await loadTargets(true); }
+  const action=event.target.dataset.action; if(action!=="toggle" && action!=="webhook") return; const card=event.target.closest(".card"); const enabled=event.target.checked;
+  const [path,message]=action==="webhook"?["webhook",enabled?"Webhook ativado":"Webhook desativado"]:["alerts",enabled?"Alertas ativados":"Alertas desativados"];
+  try { const result=await api(`/api/targets/${card.dataset.id}/${path}`,{method:"PATCH",body:JSON.stringify({enabled})}); toast(message); if(result.warning) toast(`Configuração salva, mas o reload falhou: ${result.warning}`,true); await loadTargets(true); }
   catch(error){event.target.checked=!enabled;toast(error.message,true);}
 });
 form.addEventListener("submit", async event => {
   event.preventDefault(); $("#saveSpinner").classList.remove("hidden");
-  const data=Object.fromEntries(new FormData(form)); data.size=Number(data.size); data.alerts_enabled=form.elements.alerts_enabled.checked; data.protocol="icmp"; data.menu=data.title;
+  const data=Object.fromEntries(new FormData(form)); data.size=Number(data.size); data.alerts_enabled=form.elements.alerts_enabled.checked; data.webhook_enabled=form.elements.webhook_enabled.checked; data.protocol="icmp"; data.menu=data.title;
   data.count = data.router && data.count ? Number(data.count) : null;
   if (!data.router) { data.packet_interval = ""; data.timeout = ""; }
   const id=$("#targetId").value;
@@ -124,7 +125,7 @@ $("#confirmDelete").addEventListener("click",async()=>{
   try{const result=await api(path,{method:"DELETE"});$("#deleteDialog").close();toast(isRouter?"Roteador excluído":"Destino excluído");if(result.warning)toast(`Excluído; reload pendente: ${result.warning}`,true);await (isRouter?loadRouters():loadTargets(true));}catch(error){toast(error.message,true);}
 });
 $("#addButton").addEventListener("click",()=>openForm()); $("#closeDialog").addEventListener("click",()=>dialog.close()); $("#cancelDialog").addEventListener("click",()=>dialog.close());
-$("#duplicateButton").addEventListener("click",()=>{ const data=Object.fromEntries(new FormData(form)); data.alerts_enabled=form.elements.alerts_enabled.checked; openForm(data, {duplicate:true}); });
+$("#duplicateButton").addEventListener("click",()=>{ const data=Object.fromEntries(new FormData(form)); data.alerts_enabled=form.elements.alerts_enabled.checked; data.webhook_enabled=form.elements.webhook_enabled.checked; openForm(data, {duplicate:true}); });
 $("#cancelDelete").addEventListener("click",()=>$("#deleteDialog").close()); $("#refreshButton").addEventListener("click",()=>loadTargets(true));
 $("#reloadButton").addEventListener("click",()=>$("#reloadDialog").showModal());
 $("#cancelReload").addEventListener("click",()=>$("#reloadDialog").close());
