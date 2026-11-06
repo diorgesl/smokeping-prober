@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import hashlib
 import ipaddress
+import json
 import logging
 import math
 import os
 import re
 import shutil
 import threading
+import time
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -42,6 +45,8 @@ DOWN_LOSS = float(os.getenv("DOWN_LOSS_PERCENT", "99.9"))
 HISTORY_RANGES = {"1h": (3600, 60, "2m"), "6h": (21600, 300, "5m"), "24h": (86400, 900, "15m")}
 USERNAME = os.getenv("MANAGER_USERNAME", "")
 PASSWORD = os.getenv("MANAGER_PASSWORD", "")
+WEBHOOK_PATH = Path(os.getenv("WEBHOOK_PATH", "/config/webhook.json"))
+WEBHOOK_CHECK_SECONDS = 15
 
 
 NAME_PATTERN = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,62}"
@@ -310,6 +315,20 @@ class ConfigStore:
 
     def categories(self) -> list[str]:
         return sorted({item["category"] for item in self.list()}, key=str.casefold)
+
+    def webhook_context(self) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
+        """Targets (with all their labels) and routers by name, without SSH credentials."""
+        with self.lock:
+            document = self._read()
+            targets = [
+                {**self._serialize(item), "labels": {str(k): str(v) for k, v in (item.get("labels") or {}).items()}}
+                for item in document["targets"]
+            ]
+            routers = {}
+            for item in document.get("routers") or []:
+                router = self._serialize_router(item, [])
+                routers[router["name"]] = {"name": router["name"], "address": router["address"], "links": router["links"]}
+            return targets, routers
 
     def create(self, payload: TargetInput) -> tuple[dict[str, Any], str]:
         with self.lock:
@@ -639,7 +658,7 @@ class PrometheusClient:
                 continue
         return result
 
-    def metrics(self) -> tuple[dict[tuple[str, str, str], dict[str, Any]], str]:
+    def metrics(self, window: str = METRIC_WINDOW) -> tuple[dict[tuple[str, str, str], dict[str, Any]], str]:
         """Metrics per target, keyed by (host, title, category).
 
         The top-level values come from the local ping (series with no ``link``
@@ -648,10 +667,10 @@ class PrometheusClient:
         values are None.
         """
         group = "host,title,category,link"
-        sent = f"sum by ({group}) (increase(smokeping_requests_total[{METRIC_WINDOW}]))"
-        received = f"sum by ({group}) (increase(smokeping_response_duration_seconds_count[{METRIC_WINDOW}]))"
-        duration = f"sum by ({group}) (increase(smokeping_response_duration_seconds_sum[{METRIC_WINDOW}]))"
-        buckets = f"sum by (le,{group}) (rate(smokeping_response_duration_seconds_bucket[{METRIC_WINDOW}]))"
+        sent = f"sum by ({group}) (increase(smokeping_requests_total[{window}]))"
+        received = f"sum by ({group}) (increase(smokeping_response_duration_seconds_count[{window}]))"
+        duration = f"sum by ({group}) (increase(smokeping_response_duration_seconds_sum[{window}]))"
+        buckets = f"sum by (le,{group}) (rate(smokeping_response_duration_seconds_bucket[{window}]))"
         try:
             sent_values = self.keyed(self.query(sent))
             received_values = self.keyed(self.query(received))
@@ -797,11 +816,243 @@ def reload_prober() -> str:
         return str(exc)
 
 
+class WebhookInput(BaseModel):
+    enabled: bool = False
+    url: str = Field(default="", max_length=2000)
+    auth_header: str = Field(default="", max_length=100)
+    # Empty on save keeps the stored value, so the UI never needs to read the secret back.
+    auth_value: str = Field(default="", max_length=4000)
+    loss_percent: float = Field(default=20, gt=0, le=100)
+    duration_seconds: int = Field(default=60, ge=30, le=3600)
+    send_recovery: bool = True
+    recovery_loss_percent: float = Field(default=5, ge=0, le=100)
+
+    @field_validator("url")
+    @classmethod
+    def validate_url(cls, value: str) -> str:
+        value = value.strip()
+        if value and not re.fullmatch(r"https?://\S+", value):
+            raise ValueError("A URL do webhook deve começar com http:// ou https://")
+        return value
+
+    @field_validator("auth_header")
+    @classmethod
+    def validate_header(cls, value: str) -> str:
+        value = value.strip()
+        if value and not re.fullmatch(r"[A-Za-z0-9-]+", value):
+            raise ValueError("Nome do header inválido")
+        return value
+
+    @model_validator(mode="after")
+    def validate_webhook(self) -> "WebhookInput":
+        if self.enabled and not self.url:
+            raise ValueError("Informe a URL para ativar o webhook")
+        if self.recovery_loss_percent >= self.loss_percent:
+            raise ValueError("A perda de recuperação deve ser menor que a perda de disparo")
+        return self
+
+
+class WebhookSettings:
+    """Webhook settings in a JSON file next to config.yaml (the prober never reads it)."""
+
+    def __init__(self, path: Path = WEBHOOK_PATH):
+        self.path = path
+        self.lock = threading.Lock()
+
+    def load(self) -> dict[str, Any]:
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+            return WebhookInput(**data).model_dump()
+        except FileNotFoundError:
+            return WebhookInput().model_dump()
+        except Exception as exc:
+            LOG.warning("Invalid %s, webhook disabled: %s", self.path, exc)
+            return WebhookInput().model_dump()
+
+    def merged(self, payload: WebhookInput) -> dict[str, Any]:
+        data = payload.model_dump()
+        if not data["auth_header"]:
+            data["auth_value"] = ""
+        elif not data["auth_value"]:
+            data["auth_value"] = self.load()["auth_value"]
+        return data
+
+    def save(self, payload: WebhookInput) -> dict[str, Any]:
+        with self.lock:
+            data = self.merged(payload)
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = self.path.with_suffix(".tmp")
+            # 0600: the file holds the webhook auth secret.
+            fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                json.dump(data, stream, indent=2)
+            os.replace(temporary, self.path)
+            return data
+
+    @staticmethod
+    def public(data: dict[str, Any]) -> dict[str, Any]:
+        return {**{k: v for k, v in data.items() if k != "auth_value"}, "auth_value_set": bool(data["auth_value"])}
+
+
+def now_iso(timestamp: float) -> str:
+    return datetime.fromtimestamp(timestamp).astimezone().isoformat(timespec="seconds")
+
+
+def series_values(values: dict[str, Any]) -> dict[str, Any]:
+    lost = values["loss"] >= 100
+    return {
+        "samples": values["samples"],
+        "loss_percent": values["loss"],
+        "latency_ms": None if lost else values["latency"],
+        "jitter_ms": None if lost else values["jitter"],
+    }
+
+
+class WebhookWatcher:
+    """Posts to the webhook when a series (local ping or one router link) has high loss.
+
+    Loss is averaged over the last ``duration_seconds``; one ``loss_high`` per
+    incident, then ``recovered`` once it drops below ``recovery_loss_percent``.
+    A failed POST is retried on the next check. State lives in memory, so a
+    restart forgets open incidents.
+    """
+
+    def __init__(self, store: ConfigStore, prometheus: PrometheusClient, settings: WebhookSettings):
+        self.store = store
+        self.prometheus = prometheus
+        self.settings = settings
+        self.open: dict[tuple[str, str, str, str], float] = {}
+
+    def check(self, now: float | None = None) -> None:
+        now = time.time() if now is None else now
+        settings = self.settings.load()
+        if not settings["enabled"]:
+            self.open.clear()
+            return
+        metrics, error = self.prometheus.metrics(f"{settings['duration_seconds']}s")
+        if error:
+            return
+        targets, routers = self.store.webhook_context()
+        seen = set()
+        for target in targets:
+            values = metrics.get((target["host"], target["title"], target["category"]))
+            if not values:
+                continue
+            for link, series in self._series(values):
+                if not series["samples"]:
+                    continue  # no ping run inside the window: keep the current state
+                key = (target["host"], target["title"], target["category"], link)
+                seen.add(key)
+                if key not in self.open and series["loss"] >= settings["loss_percent"]:
+                    payload = build_payload("loss_high", target, routers, link, values, settings, now, now)
+                    if send_webhook(settings, payload):
+                        self.open[key] = now
+                elif key in self.open and series["loss"] < settings["recovery_loss_percent"]:
+                    started = self.open[key]
+                    payload = build_payload("recovered", target, routers, link, values, settings, now, started)
+                    if not settings["send_recovery"] or send_webhook(settings, payload):
+                        del self.open[key]
+        # Forget incidents of targets that were deleted or renamed.
+        for key in set(self.open) - seen:
+            if not any(key[:3] == (t["host"], t["title"], t["category"]) for t in targets):
+                del self.open[key]
+
+    @staticmethod
+    def _series(values: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
+        local = [("", values)] if values.get("samples") is not None else []
+        return local + [(link["name"], link) for link in values.get("links", [])]
+
+    def run(self, stop: threading.Event) -> None:
+        while not stop.wait(WEBHOOK_CHECK_SECONDS):
+            try:
+                self.check()
+            except Exception:
+                LOG.exception("Webhook check failed")
+
+
+def build_payload(
+    event: str,
+    target: dict[str, Any],
+    routers: dict[str, dict[str, Any]],
+    link: str,
+    values: dict[str, Any] | None,
+    settings: dict[str, Any],
+    now: float,
+    started: float,
+) -> dict[str, Any]:
+    router = routers.get(target["router"]) if target["router"] else None
+    link_info = {}
+    if router:
+        link_info = next((item for item in router["links"] if item["name"] == link), {})
+    if link:
+        probe = {
+            "type": "remote",
+            "router": {"name": target["router"], "address": router["address"] if router else ""},
+            "link": link_info or {"name": link},
+        }
+    else:
+        probe = {"type": "local", "router": None, "link": None}
+
+    all_series = []
+    failing = None
+    for name, series in WebhookWatcher._series(values or {}):
+        info = next((item for item in router["links"] if item["name"] == name), {}) if router and name else {}
+        entry = {
+            "link": name or None,
+            "vpn_instance": info.get("vpn_instance") or None,
+            "source": info.get("source") or None,
+            "source6": info.get("source6") or None,
+            **series_values(series),
+        }
+        entry["failing"] = entry["loss_percent"] >= settings["loss_percent"]
+        all_series.append(entry)
+        if name == link:
+            failing = series_values(series)
+
+    return {
+        "event": event,
+        "timestamp": now_iso(now),
+        "incident": {"started_at": now_iso(started), "duration_seconds": round(now - started)},
+        "rule": {
+            "loss_percent": settings["loss_percent"],
+            "window_seconds": settings["duration_seconds"],
+            "recovery_loss_percent": settings["recovery_loss_percent"],
+        },
+        "target": target,
+        "probe": probe,
+        "metrics": failing,
+        "all_series": all_series,
+    }
+
+
+def send_webhook(settings: dict[str, Any], payload: dict[str, Any]) -> bool:
+    headers = {settings["auth_header"]: settings["auth_value"]} if settings["auth_header"] else {}
+    try:
+        response = requests.post(settings["url"], json=payload, headers=headers, timeout=10)
+        response.raise_for_status()
+        return True
+    except Exception as exc:
+        LOG.warning("Webhook %s failed: %s", payload["event"], exc)
+        return False
+
+
 store = ConfigStore()
 prometheus = PrometheusClient()
+webhook_settings = WebhookSettings()
+webhook_watcher = WebhookWatcher(store, prometheus, webhook_settings)
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    stop = threading.Event()
+    threading.Thread(target=webhook_watcher.run, args=(stop,), name="webhook", daemon=True).start()
+    yield
+    stop.set()
+
+
 security = HTTPBasic(auto_error=False)
 templates = Environment(loader=FileSystemLoader(ROOT / "templates"), autoescape=select_autoescape())
-app = FastAPI(title="SmokePing Manager", version="1.0.0", docs_url=None, redoc_url=None)
+app = FastAPI(title="SmokePing Manager", version="1.0.0", docs_url=None, redoc_url=None, lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
 
 
@@ -938,3 +1189,38 @@ def force_reload() -> dict[str, str]:
     if warning:
         raise HTTPException(status_code=502, detail=warning)
     return {"status": "reloaded"}
+
+
+@app.get("/api/webhook", dependencies=[Depends(authenticate)])
+def get_webhook() -> dict[str, Any]:
+    return WebhookSettings.public(webhook_settings.load())
+
+
+@app.put("/api/webhook", dependencies=[Depends(authenticate)])
+def save_webhook(payload: WebhookInput) -> dict[str, Any]:
+    return WebhookSettings.public(webhook_settings.save(payload))
+
+
+@app.post("/api/webhook/test", dependencies=[Depends(authenticate)])
+def test_webhook(payload: WebhookInput) -> dict[str, Any]:
+    """Sends a sample event built from a real target (a remote one when there is one)."""
+    settings = webhook_settings.merged(payload)
+    if not settings["url"]:
+        raise HTTPException(status_code=422, detail="Informe a URL do webhook")
+    targets, routers = store.webhook_context()
+    if not targets:
+        raise HTTPException(status_code=422, detail="Cadastre um destino antes de testar")
+    target = next((t for t in targets if t["router"] in routers), targets[0])
+    metrics, _ = prometheus.metrics(f"{settings['duration_seconds']}s")
+    values = metrics.get((target["host"], target["title"], target["category"]))
+    links = routers[target["router"]]["links"] if target["router"] in routers else []
+    now = time.time()
+    body = build_payload("test", target, routers, links[0]["name"] if links else "", values, settings, now, now)
+    headers = {settings["auth_header"]: settings["auth_value"]} if settings["auth_header"] else {}
+    try:
+        response = requests.post(settings["url"], json=body, headers=headers, timeout=10)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Webhook inacessível: {exc}")
+    if not response.ok:
+        raise HTTPException(status_code=502, detail=f"Webhook respondeu HTTP {response.status_code}")
+    return {"status": response.status_code, "payload": body}
