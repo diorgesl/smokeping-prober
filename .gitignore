@@ -8,6 +8,8 @@ config.yaml
 # Runtime config managed by smokeping-manager (real targets + auto-backups)
 config/config.yaml
 config/backups/
+# Webhook settings written by the manager (includes the auth header secret)
+config/webhook.json
 # Router SSH credentials read by the prober (routers: password_file/private_key_file/known_hosts)
 config/*.pass
 config/*.key

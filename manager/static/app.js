@@ -348,10 +348,45 @@ function showView(view) {
   document.querySelectorAll("nav.tabs .tab").forEach(t => { const active = t.dataset.view === view; t.classList.toggle("active", active); t.setAttribute("aria-pressed", active); });
   $("#targetsView").classList.toggle("hidden", view !== "targets");
   $("#routersView").classList.toggle("hidden", view !== "routers");
+  $("#webhookView").classList.toggle("hidden", view !== "webhook");
 }
 document.querySelectorAll("nav.tabs .tab").forEach(tab => tab.addEventListener("click", () => {
-  showView(tab.dataset.view); history.replaceState(null, "", tab.dataset.view === "routers" ? "#roteadores" : location.pathname);
+  const hash = {routers: "#roteadores", webhook: "#webhook"}[tab.dataset.view];
+  showView(tab.dataset.view); history.replaceState(null, "", hash || location.pathname);
 }));
 if (location.hash === "#roteadores") showView("routers");
+if (location.hash === "#webhook") showView("webhook");
+
+// --- Webhook ------------------------------------------------------------------
+
+const webhookForm = $("#webhookForm");
+function webhookData() {
+  const els = webhookForm.elements;
+  return {
+    enabled: els.enabled.checked, url: els.url.value, auth_header: els.auth_header.value, auth_value: els.auth_value.value,
+    loss_percent: Number(els.loss_percent.value), duration_seconds: Number(els.duration_seconds.value),
+    send_recovery: els.send_recovery.checked, recovery_loss_percent: Number(els.recovery_loss_percent.value),
+  };
+}
+function fillWebhook(data) {
+  const els = webhookForm.elements;
+  for (const key of ["url","auth_header","loss_percent","duration_seconds","recovery_loss_percent"]) els[key].value = data[key] ?? "";
+  els.enabled.checked = data.enabled; els.send_recovery.checked = data.send_recovery; els.auth_value.value = "";
+  els.auth_value.placeholder = data.auth_value_set ? "•••••• (vazio mantém o atual)" : "opcional";
+}
+async function loadWebhook() {
+  try { fillWebhook(await api("/api/webhook")); } catch (error) { toast(error.message, true); }
+}
+webhookForm.addEventListener("submit", async event => {
+  event.preventDefault(); $("#webhookSpinner").classList.remove("hidden");
+  try { fillWebhook(await api("/api/webhook", {method: "PUT", body: JSON.stringify(webhookData())})); toast("Webhook salvo"); }
+  catch (error) { toast(error.message, true); } finally { $("#webhookSpinner").classList.add("hidden"); }
+});
+$("#webhookTest").addEventListener("click", async () => {
+  const button = $("#webhookTest"); button.disabled = true;
+  try { const result = await api("/api/webhook/test", {method: "POST", body: JSON.stringify(webhookData())}); toast(`Teste enviado: HTTP ${result.status} (${result.payload.target.title})`); }
+  catch (error) { toast(error.message, true); } finally { button.disabled = false; }
+});
+loadWebhook();
 
 loadRouters(); loadTargets(); setInterval(()=>{loadTargets(true);loadRouters();},30000);
