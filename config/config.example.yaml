@@ -68,3 +68,4 @@ targets:
       title: "Google 1 - 8.8.8.8 via ne8k"
       smokeping_name: "Google-1-v4-ne8k"
       alerts_enabled: "true"
+      webhook_enabled: "true"   # dispara o webhook de perda (opcional, default false)

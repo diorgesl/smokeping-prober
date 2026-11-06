@@ -146,6 +146,10 @@
           <span><b>Alertas deste destino</b><small>Inclui o target no Alert Engine e nos diagnósticos MTR.</small></span>
           <input name="alerts_enabled" type="checkbox" checked role="switch">
         </label>
+        <label class="switch-row wide">
+          <span><b>Webhook de perda</b><small>Dispara o webhook (n8n) quando este destino ou um link dele tiver perda alta.</small></span>
+          <input name="webhook_enabled" type="checkbox" role="switch">
+        </label>
       </div>
       <div class="dialog-actions">
         <button class="button ghost hidden" id="duplicateButton" type="button">⧉ Copiar</button>

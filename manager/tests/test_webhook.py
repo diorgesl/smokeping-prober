@@ -30,7 +30,10 @@ targets:
   - host: 8.8.8.8
     router: ne8k
     interval: 1m
-    labels: {title: G, category: DNS, alerts_enabled: "true"}
+    labels: {title: G, category: DNS, alerts_enabled: "true", webhook_enabled: "true"}
+  - host: 9.9.9.9
+    interval: 1s
+    labels: {title: Q, category: DNS, alerts_enabled: "true"}
 """
 
 
@@ -56,7 +59,9 @@ class WebhookTest(unittest.TestCase):
         if local is not None:
             values.update(summary(local, 60))
         values["links"] = [{"name": "isp-a", **summary(isp_a)}, {"name": "isp-b", **summary(isp_b)}]
-        self.prometheus.metrics.return_value = ({("8.8.8.8", "G", "DNS"): values}, "")
+        # 9.9.9.9 has no webhook_enabled label: it must never trigger, even at 100% loss.
+        quad9 = {**summary(100, 60), "links": []}
+        self.prometheus.metrics.return_value = ({("8.8.8.8", "G", "DNS"): values, ("9.9.9.9", "Q", "DNS"): quad9}, "")
 
     def test_fires_once_per_link_then_recovers(self):
         with patch("app.requests.post") as post:
@@ -100,6 +105,24 @@ class WebhookTest(unittest.TestCase):
             self.assertEqual(2, post.call_count)
             body = post.call_args.kwargs["json"]
             self.assertEqual({"type": "local", "router": None, "link": None}, body["probe"])
+
+    @patch("app.reload_prober", return_value="")
+    def test_toggling_target_off_stops_and_forgets_incident(self, _reload):
+        with patch("app.requests.post") as post:
+            self.metrics(isp_a=100)
+            self.watcher.check(now=1000)
+            self.assertEqual(1, post.call_count)
+            target = next(t for t in self.watcher.store.list() if t["host"] == "8.8.8.8")
+            self.assertTrue(target["webhook_enabled"])
+            target, _ = self.watcher.store.toggle(target["id"], False, "webhook_enabled")
+            self.assertFalse(target["webhook_enabled"])
+            self.assertTrue(target["alerts_enabled"])
+            self.watcher.check(now=1015)
+            self.assertEqual({}, self.watcher.open)
+            self.watcher.store.toggle(target["id"], True, "webhook_enabled")
+            self.watcher.check(now=1030)  # still failing: a new incident fires again
+            self.assertEqual(2, post.call_count)
+            self.assertEqual("loss_high", post.call_args.kwargs["json"]["event"])
 
     def test_disabled_or_no_samples_does_nothing(self):
         with patch("app.requests.post") as post:

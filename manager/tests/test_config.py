@@ -46,7 +46,12 @@ class ConfigStoreTest(unittest.TestCase):
         self.assertEqual("ip4", target["network"])
         self.assertTrue(target["alerts_enabled"])
 
+        self.assertFalse(target["webhook_enabled"])
+
         target, _ = self.store.toggle(target["id"], False)
+        self.assertFalse(target["alerts_enabled"])
+        target, _ = self.store.toggle(target["id"], True, "webhook_enabled")
+        self.assertTrue(target["webhook_enabled"])
         self.assertFalse(target["alerts_enabled"])
 
         old_id = target["id"]
