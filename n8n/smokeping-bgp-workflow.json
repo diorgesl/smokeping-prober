@@ -1,0 +1,947 @@
+{
+  "name": "SmokePing: mitigação BGP com aprovação",
+  "nodes": [
+    {
+      "id": "39bab727-33ed-410b-b739-a25e99b1978b",
+      "name": "Webhook SmokePing",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        300
+      ],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "smokeping-tecmais",
+        "authentication": "headerAuth",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "webhookId": "b2ba2786-dda6-4b5a-bc19-973e28227479",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "",
+          "name": "SmokePing webhook"
+        }
+      }
+    },
+    {
+      "id": "7f7b170f-2cb4-42e1-8b20-3a6a2b13f432",
+      "name": "Configuração",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        300
+      ],
+      "parameters": {
+        "jsCode": "// ======================= PREENCHA AQUI =======================\nconst config = {\n  // Chat do Telegram que recebe avisos e pedidos de aprovação.\n  chat_id: '-1001234567890',\n  // URL do smokeping-manager (usada para ver se o link continua ruim antes de escalar).\n  manager_url: 'https://manager-ping.exemplo.com.br',\n  // Minutos entre uma ação aplicada e a checagem para sugerir o próximo degrau.\n  espera_escalada_min: 5,\n  // Roteador (nome no manager) -> AS local e, por link (nome no manager), o peer BGP\n  // e as route-policies de export que já existem no roteador.\n  mapa: {\n    ne8k: {\n      bgp_as: 65000,\n      links: {\n        'isp-a': {\n          peer: '192.0.2.254',\n          vpn_instance: 'upstream-1', // vazio = tabela global (ipv4-family unicast)\n          politica_normal: 'RP-ISP-A-OUT',\n          politica_community: 'RP-ISP-A-OUT-COMMUNITY',\n          politica_prepend: 'RP-ISP-A-OUT-PREPEND',\n          politica_bloqueio: 'RP-DENY-ALL',\n        },\n        'isp-b': {\n          peer: '198.51.100.254',\n          vpn_instance: '',\n          politica_normal: 'RP-ISP-B-OUT',\n          politica_community: 'RP-ISP-B-OUT-COMMUNITY',\n          politica_prepend: 'RP-ISP-B-OUT-PREPEND',\n          politica_bloqueio: 'RP-DENY-ALL',\n        },\n      },\n    },\n  },\n};\n// =============================================================\nreturn $input.all().map(item => ({ json: { ...item.json, ...config } }));\n"
+      }
+    },
+    {
+      "id": "be0d80a0-2ee8-4d62-a56f-119aaaf0b3e9",
+      "name": "Tipo de evento",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [
+        440,
+        300
+      ],
+      "parameters": {
+        "mode": "expression",
+        "numberOutputs": 3,
+        "output": "={{ ({ loss_high: 1, recovered: 2 })[$json.body.event] ?? 0 }}"
+      }
+    },
+    {
+      "id": "28dab2f7-a63b-40e6-8c70-2a7b86a61adc",
+      "name": "Avisar teste",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        700,
+        60
+      ],
+      "parameters": {
+        "chatId": "={{ $('Configuração').first().json.chat_id }}",
+        "text": "={{ '🧪 Evento ' + $json.body.event + ' recebido do smokeping-manager para ' + $json.body.target.title + '. Webhook ok.' }}",
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "HTML"
+        }
+      },
+      "credentials": {
+        "telegramApi": {
+          "id": "",
+          "name": "Telegram bot"
+        }
+      }
+    },
+    {
+      "id": "0f24452d-0fef-4ce1-9652-bfd36cec1558",
+      "name": "Preparar contexto",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        700,
+        300
+      ],
+      "parameters": {
+        "jsCode": "// Junta o alerta, o mapeamento do link e o degrau já aplicado; monta o pedido para a LLM (DeepSeek).\nconst DEGRAUS = ['nenhuma', 'community', 'prepend', 'retirar_anuncio', 'desativar_peer'];\nconst esc = s => String(s ?? '').replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[c]);\nconst cfgGeral = $('Configuração').first().json;\nconst p = $json.body;\nconst estado = $getWorkflowStaticData('global');\nestado.incidentes = estado.incidentes || {};\n\nconst link = p.probe?.link?.name || '';\nconst roteador = p.probe?.router?.name || '';\nconst chave = `${p.target.id}|${link || 'local'}`;\nconst atual = estado.incidentes[chave]?.degrau || 0;\nconst saudaveis = (p.all_series || []).filter(s => s.link && s.link !== link && !s.failing).map(s => s.link);\nconst perda = p.metrics?.loss_percent;\nconst titulo = `${p.target.title} (${p.target.host})`;\nconst base = { chave, payload: p, roteador, link, degrau_atual: atual, links_saudaveis: saudaveis };\n\nif (p.probe?.type !== 'remote') {\n  return { json: { ...base, pular: true, aviso: `ℹ️ Perda alta no ping local de <b>${esc(titulo)}</b>: ${perda}%.\\nNão há link BGP associado, nada a mitigar.` } };\n}\nconst rot = cfgGeral.mapa?.[roteador];\nconst cfg = rot?.links?.[link];\nif (!cfg) {\n  return { json: { ...base, pular: true, aviso: `⚠️ Perda de ${perda}% em <b>${esc(titulo)}</b> via ${esc(roteador)}/${esc(link)}, mas esse link não está no mapa do nó Configuração.` } };\n}\nif (atual >= DEGRAUS.length - 1) {\n  return { json: { ...base, pular: true, aviso: `⚠️ <b>${esc(titulo)}</b> via ${esc(link)} continua com ${perda}% de perda e o peer já está desativado. Intervenção manual.` } };\n}\n\nconst system = `Você é um engenheiro de redes de plantão num provedor com roteador Huawei NE8000.\nVocê recebe um alerta de perda de pacotes medida por ping remoto a partir de um link de trânsito (cada link é uma sessão BGP com um upstream) e escolhe a próxima ação de mitigação. Um operador humano aprova ou rejeita a ação antes de ela ser aplicada.\n\nDegraus, do mais leve ao mais pesado:\n1. community: exporta com uma community que pede ao upstream para reduzir a preferência das nossas rotas.\n2. prepend: exporta com AS-path prepend, desviando parte do tráfego de entrada.\n3. retirar_anuncio: deixa de anunciar nossos prefixos por esse link.\n4. desativar_peer: derruba a sessão BGP com o upstream (peer ignore).\n\nRegras:\n- Escolha \"nenhuma\" ou exatamente o próximo degrau informado em proximo_degrau.\n- Se todos os links mostram perda parecida, o problema provavelmente é o destino ou algo em comum: escolha \"nenhuma\".\n- Nunca escolha retirar_anuncio ou desativar_peer se links_saudaveis estiver vazio.\n- Perda perto do limite ou só num destino isolado favorece \"nenhuma\" ou um degrau leve.\n- O motivo vai para o operador no Telegram: português, no máximo 3 frases, citando os números que pesaram.\n\nResponda só com um objeto json neste formato:\n{\"acao\": \"nenhuma|community|prepend|retirar_anuncio|desativar_peer\", \"motivo\": \"texto\", \"risco\": \"baixo|medio|alto\", \"diagnostico\": \"link|destino|incerto\"}`;\n\nconst entrada = {\n  degrau_atual: DEGRAUS[atual],\n  proximo_degrau: DEGRAUS[atual + 1],\n  links_saudaveis: saudaveis,\n  alerta: p,\n};\n\n// DeepSeek só garante JSON válido (json_object), não o schema: decidir.js valida os campos.\nconst llm_request = {\n  model: 'deepseek-flash',\n  max_tokens: 1000,\n  response_format: { type: 'json_object' },\n  messages: [\n    { role: 'system', content: system },\n    { role: 'user', content: JSON.stringify(entrada, null, 2) },\n  ],\n};\n\nreturn { json: { ...base, pular: false, cfg: { ...cfg, bgp_as: rot.bgp_as }, llm_request } };\n",
+        "mode": "runOnceForEachItem"
+      }
+    },
+    {
+      "id": "4c974a69-3b70-4b34-ace6-715d9b1e4587",
+      "name": "Mitigável?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        920,
+        300
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "0f2910be-c98c-4910-8f4a-ad5923f02985",
+              "leftValue": "={{ !$json.pular }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "048944f4-7f04-4430-94c2-8687e373624f",
+      "name": "LLM decide",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1140,
+        220
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.deepseek.com/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.llm_request) }}",
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "",
+          "name": "DeepSeek API key"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3
+    },
+    {
+      "id": "33988afc-3c08-43d2-b860-6b9b632df20a",
+      "name": "Decidir ação",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1360,
+        220
+      ],
+      "parameters": {
+        "jsCode": "// Lê a resposta da LLM, aplica as travas de segurança e gera os comandos VRP.\nconst DEGRAUS = ['nenhuma', 'community', 'prepend', 'retirar_anuncio', 'desativar_peer'];\nconst esc = s => String(s ?? '').replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[c]);\nconst ctx = $('Preparar contexto').item.json;\nconst r = $json;\nconst p = ctx.payload;\nconst titulo = `${p.target.title} (${p.target.host})`;\n\nconst falha = motivo => ({ acao: 'nenhuma', motivo, risco: 'alto', diagnostico: 'incerto' });\nconst conteudo = r.choices?.[0]?.message?.content?.trim();\nlet decisao;\nif (!conteudo) {\n  // DeepSeek devolve conteúdo em branco quando não consegue gerar JSON válido.\n  decisao = falha('A LLM devolveu resposta vazia.');\n} else {\n  try {\n    decisao = JSON.parse(conteudo);\n  } catch (e) {\n    decisao = falha(`Resposta inválida da LLM: ${e.message}`);\n  }\n}\nif (!decisao || typeof decisao !== 'object') decisao = falha('A LLM não devolveu um objeto JSON.');\ndecisao.motivo = String(decisao.motivo || 'sem motivo informado');\nif (!['baixo', 'medio', 'alto'].includes(decisao.risco)) decisao.risco = 'alto';\nif (!['link', 'destino', 'incerto'].includes(decisao.diagnostico)) decisao.diagnostico = 'incerto';\n\nconst notas = [];\nlet degrau = DEGRAUS.indexOf(decisao.acao);\nif (degrau < 0) degrau = 0;\nif (degrau > ctx.degrau_atual + 1) {\n  degrau = ctx.degrau_atual + 1;\n  notas.push('A LLM sugeriu pular degraus; limitado ao próximo.');\n} else if (degrau > 0 && degrau <= ctx.degrau_atual) {\n  degrau = 0;\n  notas.push('Esse degrau já está aplicado.');\n}\nif (degrau >= 3 && !ctx.links_saudaveis.length) {\n  degrau = 0;\n  notas.push('Bloqueado: não há outro link saudável.');\n}\nconst acao = DEGRAUS[degrau];\n\nconst c = ctx.cfg;\nconst familia = c.vpn_instance ? `ipv4-family vpn-instance ${c.vpn_instance}` : 'ipv4-family unicast';\nconst exportar = politica => [`bgp ${c.bgp_as}`, familia, `peer ${c.peer} route-policy ${politica} export`];\nconst comandos = {\n  community: exportar(c.politica_community),\n  prepend: exportar(c.politica_prepend),\n  retirar_anuncio: exportar(c.politica_bloqueio),\n  desativar_peer: [`bgp ${c.bgp_as}`, ...(c.vpn_instance ? [familia] : []), `peer ${c.peer} ignore`],\n}[acao] || [];\n\nconst resumo = `${titulo} via ${ctx.roteador}/${ctx.link}`;\nconst perdas = (p.all_series || []).map(s => `${s.link || 'local'}: ${s.loss_percent}%${s.failing ? ' (falhando)' : ''}`).join(', ');\n\nif (acao === 'nenhuma') {\n  return { json: { ...ctx, acao, degrau, tem_acao: false, aviso:\n    `🔎 Perda alta em <b>${esc(resumo)}</b> (${p.metrics?.loss_percent}%).\\n` +\n    (decisao.acao === 'nenhuma' ? 'A LLM não recomenda mexer no BGP.\\n' : `A LLM sugeriu ${esc(decisao.acao)}, mas a ação foi bloqueada.\\n`) +\n    `Diagnóstico: ${esc(decisao.diagnostico)}. ${esc(decisao.motivo)}` + (notas.length ? `\\n${esc(notas.join(' '))}` : '') +\n    `\\nSéries: ${esc(perdas)}` } };\n}\n\nconst texto = [\n  `⚠️ Perda de ${p.metrics?.loss_percent}% em ${resumo}`,\n  `Séries: ${perdas}`,\n  `Degrau atual: ${DEGRAUS[ctx.degrau_atual]} → proposto: ${acao} (risco ${decisao.risco}, diagnóstico ${decisao.diagnostico})`,\n  `Motivo: ${decisao.motivo}`,\n  ...notas,\n  '',\n  'Comandos:',\n  ...comandos,\n  'commit',\n].join('\\n');\n\nreturn { json: { ...ctx, acao, degrau, tem_acao: true, resumo, comandos,\n  comandos_b64: Buffer.from(comandos.join('\\n')).toString('base64'), texto } };\n",
+        "mode": "runOnceForEachItem"
+      }
+    },
+    {
+      "id": "144a5ea1-7a42-4c46-bb3e-00e2baeafd52",
+      "name": "Tem ação?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1580,
+        220
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "947134f4-0e8b-4fd4-9d62-2fcb4443fc71",
+              "leftValue": "={{ $json.tem_acao }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "d7c27188-a582-481a-a40a-2e87606ec787",
+      "name": "Pedir aprovação",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1800,
+        140
+      ],
+      "parameters": {
+        "operation": "sendAndWait",
+        "chatId": "={{ $('Configuração').first().json.chat_id }}",
+        "message": "={{ $json.texto }}",
+        "approvalOptions": {
+          "values": {
+            "approvalType": "double",
+            "approveLabel": "✅ Aprovar",
+            "disapproveLabel": "❌ Rejeitar"
+          }
+        },
+        "options": {
+          "limitWaitTime": {
+            "values": {
+              "limitType": "afterTimeInterval",
+              "resumeAmount": 30,
+              "resumeUnit": "minutes"
+            }
+          }
+        }
+      },
+      "webhookId": "25b04db3-b6e5-4fc8-acfb-8be3a4b2776c",
+      "credentials": {
+        "telegramApi": {
+          "id": "",
+          "name": "Telegram bot"
+        }
+      }
+    },
+    {
+      "id": "1dc0f0f2-651f-4799-9d98-d8a3bec710bd",
+      "name": "Aprovado?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        2020,
+        140
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "a0820743-61f4-4587-b5d9-5f36ae15fd29",
+              "leftValue": "={{ $json.data?.approved === true }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "9ef463ab-1574-43b0-90cb-3cc8a7d03413",
+      "name": "Aplicar no roteador",
+      "type": "n8n-nodes-base.ssh",
+      "typeVersion": 1,
+      "position": [
+        2240,
+        60
+      ],
+      "parameters": {
+        "command": "={{ 'python3 /opt/smokeping-n8n/vrp_apply.py ' + $('Decidir ação').item.json.roteador + ' ' + $('Decidir ação').item.json.comandos_b64 }}",
+        "cwd": "/"
+      },
+      "credentials": {
+        "sshPassword": {
+          "id": "",
+          "name": "Host do vrp_apply"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "8c380e17-cff3-4a31-8b2d-945ca79dc888",
+      "name": "Avisar rejeição",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        2240,
+        240
+      ],
+      "parameters": {
+        "chatId": "={{ $('Configuração').first().json.chat_id }}",
+        "text": "={{ '🚫 Ação ' + $('Decidir ação').item.json.acao + ' não aprovada (rejeitada ou expirou) para ' + $('Decidir ação').item.json.resumo + '.' }}",
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "HTML"
+        }
+      },
+      "credentials": {
+        "telegramApi": {
+          "id": "",
+          "name": "Telegram bot"
+        }
+      }
+    },
+    {
+      "id": "64de7873-9ee4-4886-a554-8ccc41a359be",
+      "name": "Registrar aplicação",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2460,
+        60
+      ],
+      "parameters": {
+        "jsCode": "// Guarda o degrau aplicado (para escalar e para desfazer) e monta o aviso do resultado.\nconst esc = s => String(s ?? '').replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[c]);\nconst d = $('Decidir ação').item.json;\nconst ok = $json.code === 0;\nconst estado = $getWorkflowStaticData('global');\nestado.incidentes = estado.incidentes || {};\nif (ok) {\n  estado.incidentes[d.chave] = { degrau: d.degrau, roteador: d.roteador, link: d.link, cfg: d.cfg, titulo: d.payload.target.title, aplicado_em: new Date().toISOString() };\n}\nconst saida = String($json.stderr || $json.stdout || $json.error?.message || $json.error || '').slice(-1500);\nconst aviso = ok\n  ? `✅ Aplicado <b>${esc(d.acao)}</b> em ${esc(d.resumo)}.`\n  : `❌ Falhou ao aplicar ${esc(d.acao)} em ${esc(d.resumo)}.\\n<pre>${esc(saida)}</pre>`;\nreturn { json: { ok, aviso, escalar: ok && d.degrau < 4, chave: d.chave, payload: d.payload } };\n",
+        "mode": "runOnceForEachItem"
+      }
+    },
+    {
+      "id": "477737af-073d-4e32-ba93-aa7685f1fe22",
+      "name": "Avisar resultado",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        2680,
+        -40
+      ],
+      "parameters": {
+        "chatId": "={{ $('Configuração').first().json.chat_id }}",
+        "text": "={{ $json.aviso }}",
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "HTML"
+        }
+      },
+      "credentials": {
+        "telegramApi": {
+          "id": "",
+          "name": "Telegram bot"
+        }
+      }
+    },
+    {
+      "id": "305ab43f-15f0-4932-82d9-eabf015ab2d6",
+      "name": "Escalar se continuar?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        2680,
+        140
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "1c9ff064-c221-405d-85aa-d4c9a017953a",
+              "leftValue": "={{ $json.escalar }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "c5296487-2e12-4418-8e8d-05677152f55d",
+      "name": "Esperar",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        2900,
+        140
+      ],
+      "parameters": {
+        "amount": "={{ $('Configuração').first().json.espera_escalada_min }}",
+        "unit": "minutes"
+      },
+      "webhookId": "11298a99-72d5-479f-b1e4-8f50b4b5ad08"
+    },
+    {
+      "id": "0c87fbd3-aa99-4e56-8535-7b7b4b6cfae4",
+      "name": "Consultar manager",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3120,
+        140
+      ],
+      "parameters": {
+        "url": "={{ $('Configuração').first().json.manager_url }}/api/targets",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBasicAuth",
+        "options": {}
+      },
+      "credentials": {
+        "httpBasicAuth": {
+          "id": "",
+          "name": "SmokePing manager"
+        }
+      }
+    },
+    {
+      "id": "9d498762-0df4-4931-be66-5ba17dba1e16",
+      "name": "Continua falhando?",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3340,
+        140
+      ],
+      "parameters": {
+        "jsCode": "// Depois da espera: se o incidente ainda está aberto e o link continua ruim, volta para a LLM.\nconst r = $('Registrar aplicação').itemMatching(0).json;\nconst estado = $getWorkflowStaticData('global');\nif (!estado.incidentes?.[r.chave]) return [];\n\nconst p = JSON.parse(JSON.stringify(r.payload));\nconst link = p.probe?.link?.name || '';\nconst alvo = ($input.first().json.targets || []).find(t => t.id === p.target.id);\nif (!alvo?.metrics) return [];\n\nconst metricas = s => ({ loss_percent: s.loss, latency_ms: s.loss >= 100 ? null : s.latency, jitter_ms: s.loss >= 100 ? null : s.jitter, samples: s.samples });\nconst series = alvo.metrics.links || [];\nconst atual = link ? series.find(s => s.name === link) : alvo.metrics;\nif (!atual || atual.loss == null || atual.loss < p.rule.loss_percent) return [];\n\np.event = 'escalada';\np.timestamp = new Date().toISOString();\np.metrics = metricas(atual);\nfor (const s of p.all_series || []) {\n  const novo = s.link ? series.find(x => x.name === s.link) : (alvo.metrics.loss != null ? alvo.metrics : null);\n  if (novo) Object.assign(s, metricas(novo), { failing: novo.loss >= p.rule.loss_percent });\n}\nreturn [{ json: { body: p } }];\n"
+      }
+    },
+    {
+      "id": "9254e088-6b42-4b5b-afbb-e2f46013209a",
+      "name": "Avisar",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1360,
+        420
+      ],
+      "parameters": {
+        "chatId": "={{ $('Configuração').first().json.chat_id }}",
+        "text": "={{ $json.aviso }}",
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "HTML"
+        }
+      },
+      "credentials": {
+        "telegramApi": {
+          "id": "",
+          "name": "Telegram bot"
+        }
+      }
+    },
+    {
+      "id": "6576d9f6-c106-490f-819b-3181559af89e",
+      "name": "Preparar desfazer",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        700,
+        620
+      ],
+      "parameters": {
+        "jsCode": "// No recovered: se o workflow aplicou algo nesse link, monta os comandos para voltar ao normal.\nconst esc = s => String(s ?? '').replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[c]);\nconst p = $json.body;\nconst link = p.probe?.link?.name || '';\nconst chave = `${p.target.id}|${link || 'local'}`;\nconst estado = $getWorkflowStaticData('global');\nconst st = estado.incidentes?.[chave];\nconst resumo = `${p.target.title} (${p.target.host})${link ? ` via ${p.probe.router.name}/${link}` : ''}`;\n\nif (!st) {\n  return { json: { chave, tem_estado: false, aviso: `✅ <b>${esc(resumo)}</b> recuperou (perda ${p.metrics?.loss_percent}%, ${p.incident?.duration_seconds}s de incidente). Nada foi aplicado pelo workflow.` } };\n}\nconst c = st.cfg;\nconst familia = c.vpn_instance ? `ipv4-family vpn-instance ${c.vpn_instance}` : 'ipv4-family unicast';\nconst comandos = [`bgp ${c.bgp_as}`];\nif (c.vpn_instance) comandos.push(familia);\nif (st.degrau >= 4) comandos.push(`undo peer ${c.peer} ignore`);\nif (!c.vpn_instance) comandos.push(familia);\ncomandos.push(`peer ${c.peer} route-policy ${c.politica_normal} export`);\n\nconst DEGRAUS = ['nenhuma', 'community', 'prepend', 'retirar_anuncio', 'desativar_peer'];\nconst texto = [\n  `✅ ${resumo} recuperou: perda ${p.metrics?.loss_percent}%.`,\n  `Aplicado pelo workflow: ${DEGRAUS[st.degrau]} (em ${st.aplicado_em}).`,\n  'Desfazer com:',\n  ...comandos,\n  'commit',\n].join('\\n');\nreturn { json: { chave, tem_estado: true, roteador: st.roteador, resumo, comandos,\n  comandos_b64: Buffer.from(comandos.join('\\n')).toString('base64'), texto } };\n",
+        "mode": "runOnceForEachItem"
+      }
+    },
+    {
+      "id": "d6c11ee6-90b6-4357-a207-9c3c7f5abe77",
+      "name": "Algo aplicado?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        920,
+        620
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "fab3a086-d557-4f11-8d8f-8855e640bae8",
+              "leftValue": "={{ $json.tem_estado }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "cfbf6461-781e-4f95-b5e1-7307a48d5a66",
+      "name": "Aprovar desfazer",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1140,
+        560
+      ],
+      "parameters": {
+        "operation": "sendAndWait",
+        "chatId": "={{ $('Configuração').first().json.chat_id }}",
+        "message": "={{ $json.texto }}",
+        "approvalOptions": {
+          "values": {
+            "approvalType": "double",
+            "approveLabel": "✅ Aprovar",
+            "disapproveLabel": "❌ Rejeitar"
+          }
+        },
+        "options": {
+          "limitWaitTime": {
+            "values": {
+              "limitType": "afterTimeInterval",
+              "resumeAmount": 30,
+              "resumeUnit": "minutes"
+            }
+          }
+        }
+      },
+      "webhookId": "b14adf04-2684-4887-9240-dd65588d0f50",
+      "credentials": {
+        "telegramApi": {
+          "id": "",
+          "name": "Telegram bot"
+        }
+      }
+    },
+    {
+      "id": "aeb901b0-78ae-41df-82b9-4c1607ee3296",
+      "name": "Desfazer aprovado?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1360,
+        560
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "23e1d111-345d-4d64-bd6d-5c325992552c",
+              "leftValue": "={{ $json.data?.approved === true }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "7b7b7193-aa8b-4d8e-83c3-b6a2bfd66238",
+      "name": "Desfazer no roteador",
+      "type": "n8n-nodes-base.ssh",
+      "typeVersion": 1,
+      "position": [
+        1580,
+        480
+      ],
+      "parameters": {
+        "command": "={{ 'python3 /opt/smokeping-n8n/vrp_apply.py ' + $('Preparar desfazer').item.json.roteador + ' ' + $('Preparar desfazer').item.json.comandos_b64 }}",
+        "cwd": "/"
+      },
+      "credentials": {
+        "sshPassword": {
+          "id": "",
+          "name": "Host do vrp_apply"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "c9593d29-4f5e-42d2-a182-9314a2b188c2",
+      "name": "Avisar desfazer rejeitado",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1580,
+        660
+      ],
+      "parameters": {
+        "chatId": "={{ $('Configuração').first().json.chat_id }}",
+        "text": "={{ '🚫 Desfazer não aprovado para ' + $('Preparar desfazer').item.json.resumo + '. A configuração de mitigação continua no roteador.' }}",
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "HTML"
+        }
+      },
+      "credentials": {
+        "telegramApi": {
+          "id": "",
+          "name": "Telegram bot"
+        }
+      }
+    },
+    {
+      "id": "7df7b75c-05d9-4ae7-8152-6d391d932611",
+      "name": "Registrar desfazer",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1800,
+        480
+      ],
+      "parameters": {
+        "jsCode": "const esc = s => String(s ?? '').replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[c]);\nconst d = $('Preparar desfazer').item.json;\nconst ok = $json.code === 0;\nif (ok) delete $getWorkflowStaticData('global').incidentes[d.chave];\nconst saida = String($json.stderr || $json.stdout || $json.error?.message || $json.error || '').slice(-1500);\nreturn { json: { ok, aviso: ok\n  ? `↩️ Configuração normal restaurada em ${esc(d.resumo)}.`\n  : `❌ Falhou ao desfazer em ${esc(d.resumo)}.\\n<pre>${esc(saida)}</pre>` } };\n",
+        "mode": "runOnceForEachItem"
+      }
+    }
+  ],
+  "connections": {
+    "Webhook SmokePing": {
+      "main": [
+        [
+          {
+            "node": "Configuração",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Configuração": {
+      "main": [
+        [
+          {
+            "node": "Tipo de evento",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Tipo de evento": {
+      "main": [
+        [
+          {
+            "node": "Avisar teste",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Preparar contexto",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Preparar desfazer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Preparar contexto": {
+      "main": [
+        [
+          {
+            "node": "Mitigável?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mitigável?": {
+      "main": [
+        [
+          {
+            "node": "LLM decide",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Avisar",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LLM decide": {
+      "main": [
+        [
+          {
+            "node": "Decidir ação",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Decidir ação": {
+      "main": [
+        [
+          {
+            "node": "Tem ação?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Tem ação?": {
+      "main": [
+        [
+          {
+            "node": "Pedir aprovação",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Avisar",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pedir aprovação": {
+      "main": [
+        [
+          {
+            "node": "Aprovado?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Aprovado?": {
+      "main": [
+        [
+          {
+            "node": "Aplicar no roteador",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Avisar rejeição",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Aplicar no roteador": {
+      "main": [
+        [
+          {
+            "node": "Registrar aplicação",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Registrar aplicação": {
+      "main": [
+        [
+          {
+            "node": "Avisar resultado",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Escalar se continuar?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Escalar se continuar?": {
+      "main": [
+        [
+          {
+            "node": "Esperar",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Esperar": {
+      "main": [
+        [
+          {
+            "node": "Consultar manager",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Consultar manager": {
+      "main": [
+        [
+          {
+            "node": "Continua falhando?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Continua falhando?": {
+      "main": [
+        [
+          {
+            "node": "Preparar contexto",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Preparar desfazer": {
+      "main": [
+        [
+          {
+            "node": "Algo aplicado?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Algo aplicado?": {
+      "main": [
+        [
+          {
+            "node": "Aprovar desfazer",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Avisar",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Aprovar desfazer": {
+      "main": [
+        [
+          {
+            "node": "Desfazer aprovado?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Desfazer aprovado?": {
+      "main": [
+        [
+          {
+            "node": "Desfazer no roteador",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Avisar desfazer rejeitado",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Desfazer no roteador": {
+      "main": [
+        [
+          {
+            "node": "Registrar desfazer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Registrar desfazer": {
+      "main": [
+        [
+          {
+            "node": "Avisar resultado",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true
+  },
+  "pinData": {},
+  "active": false
+}
